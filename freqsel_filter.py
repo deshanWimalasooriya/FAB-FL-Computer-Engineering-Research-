@@ -1,0 +1,89 @@
+import numpy as np
+from scipy.spatial.distance import jensenshannon
+
+def compute_local_frequencies(client_class_counts, num_classes=10):
+    """
+    Computes local class frequencies (f_i^c) for all clients.
+    
+    Math:
+    f_i^c = n_i^c / \sum_{c'} n_i^{c'}
+    where n_i^c is the number of samples for class c in client i's local data.
+    """
+    num_clients = len(client_class_counts)
+    f_i = np.zeros((num_clients, num_classes))
+    
+    for i in range(num_clients):
+        # Extract class counts for client i into an array
+        counts = np.array([client_class_counts[i][c] for c in range(num_classes)])
+        total_samples = np.sum(counts)
+        
+        if total_samples > 0:
+            f_i[i] = counts / total_samples
+        else:
+            # Fallback for empty client partitions, safely defaults to uniform.
+            f_i[i] = np.ones(num_classes) / num_classes
+            
+    return f_i
+
+def compute_distances(f_i, F_pop):
+    """
+    Calculates distance d_i between each client's local frequency distribution f_i
+    and the target global population frequency F_pop.
+    
+    Math:
+    d_i = Distance(f_i, F_pop)
+    We use Jensen-Shannon distance as a symmetric, smoothed metric well-suited for 
+    comparing probability distributions, especially since Non-IID Dirichlet splits 
+    frequently produce zero-probability classes that would break standard KL-Divergence.
+    """
+    num_clients = f_i.shape[0]
+    distances = np.zeros(num_clients)
+    
+    for i in range(num_clients):
+        # JS distance returns a metric bounded between [0, 1] 
+        # where 0 means distributions are identical.
+        distances[i] = jensenshannon(f_i[i], F_pop)
+        
+    return distances
+
+def freqsel_filter(client_class_counts, K=10, num_classes=10):
+    """
+    Executes Phase 2: Client Filtering Stage (FREQSEL).
+    Selects the top K candidate clients whose data distributions most closely 
+    resemble the global population distribution.
+    """
+    # 1. Compute local class frequency vectors f_i^c for all clients
+    f_i = compute_local_frequencies(client_class_counts, num_classes)
+    
+    # 2. Compute the global population frequency vector F_pop^c.
+    # Because CIFAR-10's training set is perfectly balanced globally, 
+    # the ideal target F_pop is a uniform distribution: F_pop^c = 1 / C
+    F_pop = np.ones(num_classes) / num_classes
+    
+    # 3. Calculate distributional distance d_i for all clients
+    distances = compute_distances(f_i, F_pop)
+    
+    # 4. Filter the top K clients with the SMALLEST distance d_i.
+    # np.argsort returns indices sorting elements from smallest (closest to F_pop) to largest.
+    ranked_clients = np.argsort(distances)
+    candidate_pool = ranked_clients[:K].tolist()
+    
+    # Extract distance metadata for debugging/logging purposes
+    candidate_distances = {client_id: distances[client_id] for client_id in candidate_pool}
+    
+    return candidate_pool, candidate_distances
+
+# Example execution if run directly
+if __name__ == "__main__":
+    print("Executing Phase 2: freqsel_filter.py (FREQSEL Stage)")
+    # Mocking some data for demonstration
+    mock_class_counts = {
+        0: {c: 500 if c == 0 else 55 for c in range(10)},  # Highly skewed
+        1: {c: 100 for c in range(10)},                    # Perfectly IID
+        2: {c: 200 if c in [1, 2] else 66 for c in range(10)} # Moderately skewed
+    }
+    
+    # We only have 3 mocked clients, let's filter top 2
+    candidates, dist_info = freqsel_filter(mock_class_counts, K=2)
+    print("\nSelected candidate pool:", candidates)
+    print("Distances:", dist_info)
