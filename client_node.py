@@ -116,7 +116,7 @@ class ClientNode:
         simulated_latency_sec = self._simulate_latency(total_samples)
         
         # Extract updated weights to send back to the server (move to CPU for Ray transfer)
-        updated_state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
+        updated_state_dict = {k: v.cpu().detach().numpy() for k, v in model.state_dict().items()}
         
         metrics = {
             'client_id': self.client_id,
