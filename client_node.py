@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 import torchvision.models as models
 import ray
 import numpy as np
+import gc
 
 @ray.remote
 class ClientNode:
@@ -125,6 +126,14 @@ class ClientNode:
             'accuracy': accuracy,
             'latency': simulated_latency_sec
         }
+        
+        # Explicitly delete local variables that hold PyTorch memory
+        del model
+        del criterion
+        del optimizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
         
         return updated_state_dict, metrics
 

@@ -2,7 +2,7 @@ import numpy as np
 from scipy.spatial.distance import jensenshannon
 
 def compute_local_frequencies(client_class_counts, num_classes=10):
-    """
+    r"""
     Computes local class frequencies (f_i^c) for all clients.
     
     Math:
