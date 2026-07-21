@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 import torchvision.models as models
 import ray
 import numpy as np
+import gc
 
 @ray.remote
 class ClientNode:
@@ -116,7 +117,7 @@ class ClientNode:
         simulated_latency_sec = self._simulate_latency(total_samples)
         
         # Extract updated weights to send back to the server (move to CPU for Ray transfer)
-        updated_state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
+        updated_state_dict = {k: v.cpu().detach().numpy() for k, v in model.state_dict().items()}
         
         metrics = {
             'client_id': self.client_id,
@@ -125,6 +126,14 @@ class ClientNode:
             'accuracy': accuracy,
             'latency': simulated_latency_sec
         }
+        
+        # Explicitly delete local variables that hold PyTorch memory
+        del model
+        del criterion
+        del optimizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
         
         return updated_state_dict, metrics
 

@@ -4,6 +4,7 @@ import torch.nn as nn
 import torchvision.models as models
 from collections import OrderedDict
 import copy
+import gc
 
 # Import custom modules from previous phases
 from dataset import prepare_federated_data
@@ -24,12 +25,12 @@ def fedavg_aggregate(global_model, client_weights_list):
     # Initialize avg_weights with zeros mapping to global model architecture
     for k in client_weights_list[0].keys():
         # Ensure tensor is cast correctly and detached
-        avg_weights[k] = torch.zeros_like(client_weights_list[0][k], dtype=torch.float32)
+        avg_weights[k] = torch.zeros_like(torch.as_tensor(client_weights_list[0][k]), dtype=torch.float32)
         
     # Sum all weights from the selected cohort
     for client_weights in client_weights_list:
         for k in client_weights.keys():
-            avg_weights[k] += client_weights[k]
+            avg_weights[k] += torch.as_tensor(client_weights[k])
             
     # Divide by m to get the average
     for k in avg_weights.keys():
@@ -51,9 +52,9 @@ def main():
     # ignore_reinit_error prevents crashes if run multiple times in an interactive session
     ray.init(ignore_reinit_error=True)
     
-    N = 20  # Total clients
-    K = 10  # Candidate pool size (FREQSEL)
-    m = 5   # Selected clients per round (BSFL)
+    N = 10  # Total clients
+    K = 5  # Candidate pool size (FREQSEL)
+    m = 3   # Selected clients per round (BSFL)
     num_rounds = 10
     
     print("=== FAB-FL System Initialization ===")
@@ -132,6 +133,11 @@ def main():
         
         # --- Stage 4: Federated Aggregation (FedAvg) ---
         fedavg_aggregate(global_model, client_weights_list)
+        
+        # Clear Ray Object Store and Collect Garbage
+        del futures
+        del results
+        gc.collect()
         
     print("\n=== FAB-FL Training Complete ===")
     ray.shutdown()

@@ -53,7 +53,7 @@ class BSFLScheduler:
             self.estimated_speeds[client_id] = old_speed + (speed - old_speed) / n
 
     def calculate_ucb_speed(self, candidate_pool):
-        """
+        r"""
         Calculates the UCB speed metric for the K candidates.
         
         Math:
