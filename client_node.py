@@ -9,7 +9,7 @@ import gc
 
 @ray.remote
 class ClientNode:
-    def __init__(self, client_id, dataset_split, batch_size=32, local_epochs=1, learning_rate=0.01):
+    def __init__(self, client_id, dataset_split, batch_size=32, local_epochs=10, learning_rate=0.01):
         """
         Initializes the Ray remote client node for Federated Learning.
         

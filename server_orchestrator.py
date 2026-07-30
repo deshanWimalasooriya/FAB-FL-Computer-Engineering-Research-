@@ -5,9 +5,10 @@ import torchvision.models as models
 from collections import OrderedDict
 import copy
 import gc
+from torch.utils.data import DataLoader
 
 # Import custom modules from previous phases
-from dataset import prepare_federated_data
+from dataset import prepare_federated_data, plot_client_data_distribution
 from freqsel_filter import freqsel_filter
 from bsfl_scheduler import BSFLScheduler
 from client_node import ClientNode
@@ -47,6 +48,40 @@ def create_global_model():
     model.maxpool = nn.Identity()
     return model
 
+def evaluate_global_model(global_model, testset):
+    """
+    Evaluates the global model on the global test dataset.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    global_model.to(device)
+    global_model.eval()
+    
+    testloader = DataLoader(testset, batch_size=128, shuffle=False)
+    criterion = nn.CrossEntropyLoss()
+    
+    total_loss = 0.0
+    correct = 0
+    total_samples = 0
+    
+    with torch.no_grad():
+        for data, target in testloader:
+            data, target = data.to(device), target.to(device)
+            output = global_model(data)
+            loss = criterion(output, target)
+            
+            total_loss += loss.item() * data.size(0)
+            _, predicted = output.max(1)
+            total_samples += target.size(0)
+            correct += predicted.eq(target).sum().item()
+            
+    avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
+    accuracy = 100. * correct / total_samples if total_samples > 0 else 0.0
+    
+    # Move model back to CPU so Ray serialization works normally during the next round
+    global_model.to('cpu')
+    
+    return avg_loss, accuracy
+
 def main():
     # 1. Initialize Ray cluster (Local Mode for laptop CPU simulation)
     # ignore_reinit_error prevents crashes if run multiple times in an interactive session
@@ -64,6 +99,10 @@ def main():
     print("\n[Phase 1] Partitioning CIFAR-10 data (Dirichlet alpha=0.5)...")
     client_datasets, client_class_counts, testset = prepare_federated_data(num_clients=N, alpha=0.5)
     
+    # Plot the client data distribution
+    print("Plotting data distribution to 'client_data_distribution.png'...")
+    plot_client_data_distribution(client_class_counts)
+    
     # 3. Initialize Global Model and Server State
     global_model = create_global_model()
     
@@ -75,7 +114,7 @@ def main():
             client_id=i, 
             dataset_split=client_datasets[i],
             batch_size=32,
-            local_epochs=1,
+            local_epochs=10,
             learning_rate=0.01
         )
         
@@ -133,6 +172,11 @@ def main():
         
         # --- Stage 4: Federated Aggregation (FedAvg) ---
         fedavg_aggregate(global_model, client_weights_list)
+        
+        # --- Stage 5: Evaluate Global Model ---
+        print(f"Evaluating Global Model on Test Set...")
+        test_loss, test_acc = evaluate_global_model(global_model, testset)
+        print(f"Round {round_num} Global Model Evaluation -> Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%\n")
         
         # Clear Ray Object Store and Collect Garbage
         del futures

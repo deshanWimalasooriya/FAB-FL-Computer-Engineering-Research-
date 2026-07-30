@@ -3,6 +3,7 @@ import torchvision
 import torchvision.transforms as transforms
 import numpy as np
 from torch.utils.data import Subset
+import matplotlib.pyplot as plt
 
 def get_cifar10(root_dir='./data'):
     """
@@ -100,6 +101,46 @@ def prepare_federated_data(num_clients=20, alpha=0.5, root_dir='./data'):
         
     return client_datasets, client_class_counts, testset
 
+def plot_client_data_distribution(client_class_counts, num_classes=10):
+    """
+    Plots the data distribution across clients using a stacked bar chart.
+    Each of the 10 classes is represented by a different color.
+    """
+    num_clients = len(client_class_counts)
+    
+    # Prepare data for plotting: matrix of shape (num_classes, num_clients)
+    distribution_matrix = np.zeros((num_classes, num_clients))
+    for client_id, counts in client_class_counts.items():
+        for class_id, count in counts.items():
+            distribution_matrix[class_id, client_id] = count
+            
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # 10 distinct colors for the 10 classes
+    colors = plt.cm.tab10(np.linspace(0, 1, num_classes))
+    
+    bottom = np.zeros(num_clients)
+    client_indices = np.arange(num_clients)
+    
+    for class_id in range(num_classes):
+        ax.bar(client_indices, distribution_matrix[class_id], bottom=bottom, 
+               color=colors[class_id], label=f'Class {class_id}')
+        bottom += distribution_matrix[class_id]
+        
+    ax.set_xlabel('Client ID')
+    ax.set_ylabel('Number of Samples')
+    ax.set_title('CIFAR-10 Data Distribution among Clients (Dirichlet)')
+    ax.set_xticks(client_indices)
+    # Put legend outside the plot
+    ax.legend(title="Classes", bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.savefig('client_data_distribution.png')
+    print("Saved data distribution plot to 'client_data_distribution.png'")
+    # Note: Using block=False or skipping show() might be better for automated scripts,
+    # but plt.show() allows the user to see it. 
+    # plt.show()
+
+
 # Example usage/test execution if run directly
 if __name__ == "__main__":
     print("Executing Phase 1: dataset.py (Data Utilities)")
@@ -109,3 +150,6 @@ if __name__ == "__main__":
     print("\nSample Class Counts for Client 0:")
     print(client_class_counts[0])
     print(f"Total samples for Client 0: {len(client_datasets[0])}")
+    
+    print("\nPlotting Data Distribution...")
+    plot_client_data_distribution(client_class_counts)
