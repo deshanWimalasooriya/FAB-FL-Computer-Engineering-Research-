@@ -90,11 +90,11 @@ class ClientNode:
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.SGD(model.parameters(), lr=self.lr, momentum=0.9, weight_decay=5e-4)
         
-        total_loss = 0.0
-        correct = 0
-        total_samples = 0
-        
         for epoch in range(self.local_epochs):
+            total_loss = 0.0
+            correct = 0
+            total_samples = 0
+            
             for data, target in self.dataloader:
                 data, target = data.to(self.device), target.to(self.device)
                 
