@@ -41,6 +41,9 @@ class ClientNode:
         
         # Simulated network latency (e.g., ping time in milliseconds)
         self.network_delay = np.random.uniform(10.0, 100.0)
+        
+        # Instantiate model once to avoid memory fragmentation per round
+        self.model = self._create_model()
 
     def _simulate_latency(self, num_samples):
         """
@@ -82,7 +85,7 @@ class ClientNode:
             updated_state_dict: The new weights after local training.
             metrics: A dictionary containing loss, accuracy, and simulated latency.
         """
-        model = self._create_model()
+        model = self.model
         model.load_state_dict(global_model_state_dict)
         model.to(self.device)
         model.train()
@@ -128,7 +131,7 @@ class ClientNode:
         }
         
         # Explicitly delete local variables that hold PyTorch memory
-        del model
+        # Note: We do NOT delete `self.model` to avoid memory fragmentation across rounds
         del criterion
         del optimizer
         if torch.cuda.is_available():

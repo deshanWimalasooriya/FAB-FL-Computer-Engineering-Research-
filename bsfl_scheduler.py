@@ -52,15 +52,15 @@ class BSFLScheduler:
             old_speed = self.estimated_speeds[client_id]
             self.estimated_speeds[client_id] = old_speed + (speed - old_speed) / n
 
-    def calculate_ucb_speed(self, candidate_pool):
+    def calculate_ucb_speed(self, all_clients):
         r"""
-        Calculates the UCB speed metric for the K candidates.
+        Calculates the UCB speed metric for all N clients.
         
         Math:
         UCB_{k,t} = \mu_k(t) + c * \sqrt{ \ln(t) / N_k(t) }
         """
         ucb_scores = {}
-        for k in candidate_pool:
+        for k in all_clients:
             if self.selection_counts[k] == 0:
                 # If a client has never been selected, grant infinite UCB score 
                 # to strongly encourage exploration of unknown clients.
@@ -72,24 +72,24 @@ class BSFLScheduler:
                 
         return ucb_scores
 
-    def schedule(self, candidate_pool, candidate_distances):
+    def schedule(self, all_clients, candidate_distances):
         """
         Phase 3: Scheduling Stage (BSFL).
-        Selects the final m clients from the K candidates based on the combined reward A_t.
+        Selects the final m clients from all N clients based on the combined reward A_t.
         
         Math:
         Reward A_{k,t} = \alpha * (1 - normalized_distance_k) + \beta * normalized_ucb_speed_k
         We maximize A_{k,t} to balance fast convergence (low distance) and low latency (high speed).
         """
-        # 1. Calculate UCB speeds for the candidate pool
-        ucb_scores = self.calculate_ucb_speed(candidate_pool)
+        # 1. Calculate UCB speeds for all clients
+        ucb_scores = self.calculate_ucb_speed(all_clients)
         
         selected = []
         remaining_m = self.m
         
         # 2. Edge Case Handling: Initial rounds where some UCB scores are infinity (unexplored)
         # Prioritize exploring these clients, breaking ties using their FREQSEL distances.
-        unexplored = [k for k in candidate_pool if ucb_scores[k] == float('inf')]
+        unexplored = [k for k in all_clients if ucb_scores[k] == float('inf')]
         if len(unexplored) > 0:
             # Sort unexplored clients by distance (lower distance is better)
             unexplored.sort(key=lambda k: candidate_distances[k])
@@ -100,13 +100,14 @@ class BSFLScheduler:
                 # Take all unexplored, and fill the rest by maximizing reward for explored
                 selected = unexplored
                 remaining_m = self.m - len(unexplored)
-                # Filter candidate pool to only explored clients for reward calculation
-                candidate_pool = [k for k in candidate_pool if k not in unexplored]
+                # Filter all_clients to only explored clients for reward calculation
+                all_clients = [k for k in all_clients if k not in unexplored]
                 
         # 3. Normalize Distances and UCB speeds for fair combination in the reward function
-        if len(candidate_pool) > 0:
-            d_values = np.array([candidate_distances[k] for k in candidate_pool])
-            u_values = np.array([ucb_scores[k] for k in candidate_pool])
+        # Because we are processing all N clients, min_max_norm correctly scales globally across the active system.
+        if len(all_clients) > 0:
+            d_values = np.array([candidate_distances[k] for k in all_clients])
+            u_values = np.array([ucb_scores[k] for k in all_clients])
             
             def min_max_norm(arr):
                 ptp = np.ptp(arr)
@@ -124,7 +125,7 @@ class BSFLScheduler:
             best_indices = np.argsort(rewards)[-remaining_m:][::-1]
             
             for idx in best_indices:
-                selected.append(candidate_pool[idx])
+                selected.append(all_clients[idx])
                 
         return selected
 
@@ -134,11 +135,11 @@ if __name__ == "__main__":
     scheduler = BSFLScheduler(num_clients=20, m=5)
     
     # Mock data arriving from Phase 2 (FREQSEL)
-    mock_candidates = [2, 5, 8, 12, 15, 18, 19, 1, 3, 7] # K=10
-    mock_distances = {k: np.random.uniform(0.1, 0.9) for k in mock_candidates}
+    mock_all_clients = list(range(20)) # N=20
+    mock_distances = {k: np.random.uniform(0.1, 0.9) for k in mock_all_clients}
     
     # First round - selects top 5 based purely on distance (since speeds are UCB=inf)
-    selected_m = scheduler.schedule(mock_candidates, mock_distances)
+    selected_m = scheduler.schedule(mock_all_clients, mock_distances)
     print(f"Round 1 (Exploration) Selected clients: {selected_m}")
     
     # Simulate finishing the round and recording simulated latencies

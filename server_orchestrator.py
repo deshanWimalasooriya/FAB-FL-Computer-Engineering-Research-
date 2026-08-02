@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 # Import custom modules from previous phases
 from dataset import prepare_federated_data, plot_client_data_distribution
-from freqsel_filter import freqsel_filter
+from freqsel_filter import evaluate_all_distances
 from bsfl_scheduler import BSFLScheduler
 from client_node import ClientNode
 
@@ -88,12 +88,11 @@ def main():
     ray.init(ignore_reinit_error=True)
     
     N = 10  # Total clients
-    K = 5  # Candidate pool size (FREQSEL)
     m = 3   # Selected clients per round (BSFL)
     num_rounds = 10
     
     print("=== FAB-FL System Initialization ===")
-    print(f"Total Clients (N): {N}, Candidates (K): {K}, Selected (m): {m}")
+    print(f"Total Clients (N): {N}, Selected per round (m): {m}")
     
     # 2. Prepare Data (Phase 1)
     print("\n[Phase 1] Partitioning CIFAR-10 data (Dirichlet alpha=0.5)...")
@@ -126,12 +125,13 @@ def main():
     for round_num in range(1, num_rounds + 1):
         print(f"\n--- Round {round_num} ---")
         
-        # --- Stage 1: FREQSEL Filtering (Phase 2) ---
-        candidate_pool, candidate_distances = freqsel_filter(client_class_counts, K=K)
-        print(f"FREQSEL Candidate Pool (K={K}): {candidate_pool}")
+        # --- Stage 1: Metadata Collection & Evaluation (Phase 2) ---
+        all_clients = list(range(N))
+        candidate_distances = evaluate_all_distances(client_class_counts)
+        print(f"Evaluated all {N} clients' statistical distances.")
         
         # --- Stage 2: BSFL Scheduling (Phase 3) ---
-        selected_clients = scheduler.schedule(candidate_pool, candidate_distances)
+        selected_clients = scheduler.schedule(all_clients, candidate_distances)
         print(f"BSFL Selected Clients (m={m}): {selected_clients}")
         
         # --- Stage 3: Local Training via Ray ---

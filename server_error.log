@@ -1,0 +1,34 @@
+Server failed to start:
+Traceback (most recent call last):
+  File "C:\Users\dcrea\AppData\Local\Programs\Python\Python313\Lib\logging\config.py", line 583, in configure
+    formatters[name] = self.configure_formatter(
+                       ~~~~~~~~~~~~~~~~~~~~~~~~^
+                                        formatters[name])
+                                        ^^^^^^^^^^^^^^^^^
+  File "C:\Users\dcrea\AppData\Local\Programs\Python\Python313\Lib\logging\config.py", line 693, in configure_formatter
+    result = self.configure_custom(config)
+  File "C:\Users\dcrea\AppData\Local\Programs\Python\Python313\Lib\logging\config.py", line 487, in configure_custom
+    result = c(**kwargs)
+  File "C:\Work\GitHub\FAB-FL-Computer-Engineering-Research-\venv\Lib\site-packages\uvicorn\logging.py", line 42, in __init__
+    self.use_colors = sys.stdout.isatty()
+                      ^^^^^^^^^^^^^^^^^
+AttributeError: 'StdoutRedirector' object has no attribute 'isatty'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Work\GitHub\FAB-FL-Computer-Engineering-Research-\FAB-FL-Software\server_app.py", line 80, in run_server
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
+  File "C:\Work\GitHub\FAB-FL-Computer-Engineering-Research-\venv\Lib\site-packages\uvicorn\config.py", line 297, in __init__
+    self.configure_logging()
+    ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Work\GitHub\FAB-FL-Computer-Engineering-Research-\venv\Lib\site-packages\uvicorn\config.py", line 392, in configure_logging
+    logging.config.dictConfig(self.log_config)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\dcrea\AppData\Local\Programs\Python\Python313\Lib\logging\config.py", line 935, in dictConfig
+    dictConfigClass(config).configure()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\dcrea\AppData\Local\Programs\Python\Python313\Lib\logging\config.py", line 586, in configure
+    raise ValueError('Unable to configure '
+                     'formatter %r' % name) from e
+ValueError: Unable to configure formatter 'default'

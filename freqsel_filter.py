@@ -46,11 +46,10 @@ def compute_distances(f_i, F_pop):
         
     return distances
 
-def freqsel_filter(client_class_counts, K=10, num_classes=10):
+def evaluate_all_distances(client_class_counts, num_classes=10):
     """
-    Executes Phase 2: Client Filtering Stage (FREQSEL).
-    Selects the top K candidate clients whose data distributions most closely 
-    resemble the global population distribution.
+    Executes Phase 2: Metadata Collection & Evaluation (FREQSEL).
+    Evaluates the distributional distance d_i for all N clients without truncation.
     """
     # 1. Compute local class frequency vectors f_i^c for all clients
     f_i = compute_local_frequencies(client_class_counts, num_classes)
@@ -63,15 +62,10 @@ def freqsel_filter(client_class_counts, K=10, num_classes=10):
     # 3. Calculate distributional distance d_i for all clients
     distances = compute_distances(f_i, F_pop)
     
-    # 4. Filter the top K clients with the SMALLEST distance d_i.
-    # np.argsort returns indices sorting elements from smallest (closest to F_pop) to largest.
-    ranked_clients = np.argsort(distances)
-    candidate_pool = ranked_clients[:K].tolist()
+    # 4. Return distance metadata for all N clients
+    candidate_distances = {client_id: distances[client_id] for client_id in range(len(client_class_counts))}
     
-    # Extract distance metadata for debugging/logging purposes
-    candidate_distances = {client_id: distances[client_id] for client_id in candidate_pool}
-    
-    return candidate_pool, candidate_distances
+    return candidate_distances
 
 # Example execution if run directly
 if __name__ == "__main__":
@@ -83,7 +77,7 @@ if __name__ == "__main__":
         2: {c: 200 if c in [1, 2] else 66 for c in range(10)} # Moderately skewed
     }
     
-    # We only have 3 mocked clients, let's filter top 2
-    candidates, dist_info = freqsel_filter(mock_class_counts, K=2)
-    print("\nSelected candidate pool:", candidates)
+    # We evaluate all clients directly
+    dist_info = evaluate_all_distances(mock_class_counts)
+    print("\nEvaluated all clients.")
     print("Distances:", dist_info)

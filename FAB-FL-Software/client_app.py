@@ -1,592 +1,327 @@
 import customtkinter as ctk
-import tkinter as tk
-import psutil
 import threading
-import time
-import requests
-import uuid
-import math
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from tkinter import messagebox, filedialog
-from PIL import Image, ImageTk
-import socket
-import numpy as np
-import matplotlib.pyplot as plt
+import sys
 import os
-def get_local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(('10.254.254.254', 1))
-        return s.getsockname()[0]
-    except Exception:
-        return '127.0.0.1'
-    finally:
-        s.close()
+import time
+import tkinter.filedialog as filedialog
+from PIL import Image
 
+# Add parent directory to path to import backend logic
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import Client
+from predictor import predict_image
+
+# --- Styling Constants ---
 BG_COLOR = "#1a1a24"
 PANEL_COLOR = "#252533"
+SIDEBAR_COLOR = "#1e1e2d"
 CYAN = "#00f2fe"
-PURPLE = "#4facfe"
 GREEN = "#00e676"
+PURPLE = "#4facfe"
 TEXT_MAIN = "#ffffff"
 TEXT_SUB = "#a0a0b5"
 
+CLASS_COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+]
+
 ctk.set_appearance_mode("Dark")
-
-class CircularProgressbar(ctk.CTkCanvas):
-    def __init__(self, parent, size=80, thickness=8, color=CYAN, bg_color="#3a3a4d"):
-        super().__init__(parent, width=size, height=size, bg=PANEL_COLOR, highlightthickness=0)
-        self.size = size
-        self.thickness = thickness
-        self.color = color
-        self.bg_color = bg_color
-        self.value = 0
-        self.draw_arc()
-
-    def draw_arc(self):
-        self.delete("all")
-        margin = self.thickness / 2
-        # Draw background ring
-        self.create_oval(margin, margin, self.size-margin, self.size-margin, 
-                         outline=self.bg_color, width=self.thickness)
-        
-        # Draw progress ring
-        extent = -(self.value / 100) * 360
-        self.create_arc(margin, margin, self.size-margin, self.size-margin,
-                        start=90, extent=extent, outline=self.color, width=self.thickness, style=tk.ARC)
-        
-        # Draw text
-        self.create_text(self.size/2, self.size/2, text=f"{int(self.value)}%", 
-                         fill=TEXT_MAIN, font=("Arial", 14, "bold"))
-
-    def set(self, value):
-        self.value = value
-        self.draw_arc()
 
 class ClientGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("FAB-FL Worker Node v1.0")
-        self.geometry("800x1050")
+        self.title("FAB-FL Client Node v2.0")
+        self.geometry("1100x750")
         self.configure(fg_color=BG_COLOR)
-        self.server_ip = ""
-        self.laptop_id = f"Node-{str(uuid.uuid4())[:4].upper()}"
         
+        self.last_log_count = 0
+        
+        self.frames = {}
+        self.sidebar_btns = {}
+        self.current_frame = None
+
         self.setup_ui()
-        
-    def setup_ui(self):
-        # --- Header ---
-        header_frame = ctk.CTkFrame(self, fg_color="transparent")
-        header_frame.pack(fill="x", padx=20, pady=(15, 5))
-        
-        left_header = ctk.CTkFrame(header_frame, fg_color="transparent")
-        left_header.pack(side="left")
-        
-        title_label = ctk.CTkLabel(left_header, text="FAB-FL Worker Node", font=("Arial", 24, "bold"), text_color=TEXT_MAIN)
-        title_label.pack(anchor="w")
-        
-        self.refresh_btn = ctk.CTkButton(left_header, text="🔄 Refresh Client App", width=150, height=24, fg_color="#3a3a4d", hover_color="#4a4a5d", font=("Arial", 11), command=self.refresh_laptop)
-        self.refresh_btn.pack(anchor="w", pady=(2, 0))
-        
-        self.conn_status = ctk.CTkLabel(header_frame, text="Connection: 🔴 DISCONNECTED", text_color=TEXT_SUB, font=("Arial", 12))
-        self.conn_status.pack(side="right", anchor="n")
+        self.select_frame("Home")
+        self.update_dashboard()
 
-        # --- Tabview Nav Bar ---
-        self.tabview = ctk.CTkTabview(self, fg_color="transparent", text_color=TEXT_MAIN, segmented_button_selected_color=CYAN, segmented_button_selected_hover_color="#00c0cb", segmented_button_unselected_color="#1a1a24")
-        self.tabview.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.tabview.add("Dashboard")
-        self.tabview.add("Test")
+    def connect_client(self):
+        url = self.url_entry.get().strip()
+        n_val = self.n_entry.get().strip()
+        dev_name = self.dev_entry.get().strip()
         
-        dashboard = self.tabview.tab("Dashboard")
-        test_tab = self.tabview.tab("Test")
-
-        # --- Top Panels Container ---
-        top_container = ctk.CTkFrame(dashboard, fg_color="transparent")
-        top_container.pack(fill="x", padx=10, pady=10)
-        top_container.grid_columnconfigure(0, weight=1)
-        top_container.grid_columnconfigure(1, weight=1)
-
-        # 1. Server Connection & Profile
-        conn_panel = ctk.CTkFrame(top_container, fg_color=PANEL_COLOR, corner_radius=10)
-        conn_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        
-        ctk.CTkLabel(conn_panel, text="SERVER CONNECTION & PROFILE", font=("Arial", 12, "bold"), text_color=TEXT_SUB).pack(anchor="w", padx=15, pady=(15, 5))
-        ctk.CTkLabel(conn_panel, text="Server IP Address:", font=("Arial", 12), text_color=TEXT_MAIN).pack(anchor="w", padx=15)
-        
-        ip_frame = ctk.CTkFrame(conn_panel, fg_color="transparent")
-        ip_frame.pack(fill="x", padx=15, pady=5)
-        
-        self.ip_entry = ctk.CTkEntry(ip_frame, placeholder_text="192.168.1.100:8000", width=200, fg_color="#1a1a24", border_width=1)
-        self.ip_entry.pack(side="left")
-        
-        # Context Menu for Copy/Paste
-        self.ip_context_menu = tk.Menu(self, tearoff=0, bg=PANEL_COLOR, fg=TEXT_MAIN)
-        
-        def copy_ip():
-            self.clipboard_clear()
-            self.clipboard_append(self.ip_entry.get())
-            
-        def paste_ip():
-            try:
-                self.ip_entry.delete(0, "end")
-                self.ip_entry.insert(0, self.clipboard_get())
-            except tk.TclError:
-                pass
-                
-        self.ip_context_menu.add_command(label="Copy", command=copy_ip)
-        self.ip_context_menu.add_command(label="Paste", command=paste_ip)
-
-        def show_context_menu(event):
-            try:
-                self.ip_context_menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                self.ip_context_menu.grab_release()
-
-        # Bind right-click
-        self.ip_entry.bind("<Button-3>", show_context_menu)
-        
-        
-        self.connect_btn = ctk.CTkButton(ip_frame, text="Connect", fg_color=CYAN, text_color="black", hover_color="#00c0cb", width=80, command=self.connect_server)
-        self.connect_btn.pack(side="left", padx=10)
-
-        # 2. Hardware Profiling
-        hw_panel = ctk.CTkFrame(top_container, fg_color=PANEL_COLOR, corner_radius=10)
-        hw_panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
-        
-        ctk.CTkLabel(hw_panel, text="HARDWARE PROFILING", font=("Arial", 12, "bold"), text_color=TEXT_SUB).pack(anchor="w", padx=15, pady=(15, 5))
-        
-        gauges_frame = ctk.CTkFrame(hw_panel, fg_color="transparent")
-        gauges_frame.pack(fill="x", padx=15)
-        
-        # CPU
-        cpu_frame = ctk.CTkFrame(gauges_frame, fg_color="transparent")
-        cpu_frame.pack(side="left")
-        self.cpu_gauge = CircularProgressbar(cpu_frame, size=60, color=CYAN)
-        self.cpu_gauge.pack()
-        ctk.CTkLabel(cpu_frame, text="CPU USAGE", font=("Arial", 10), text_color=TEXT_MAIN).pack()
-        
-        # RAM
-        ram_frame = ctk.CTkFrame(gauges_frame, fg_color="transparent")
-        ram_frame.pack(side="left", padx=20)
-        self.ram_gauge = CircularProgressbar(ram_frame, size=60, color=PURPLE)
-        self.ram_gauge.pack()
-        self.ram_lbl = ctk.CTkLabel(ram_frame, text="RAM USAGE", font=("Arial", 10), text_color=TEXT_MAIN)
-        self.ram_lbl.pack()
-
-        # Settings
-        settings_frame = ctk.CTkFrame(hw_panel, fg_color="transparent")
-        settings_frame.pack(fill="x", padx=15, pady=10)
-        
-        cli_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
-        cli_frame.pack(side="left")
-        ctk.CTkLabel(cli_frame, text="Virtual Clients:", font=("Arial", 11), text_color=TEXT_SUB).pack(anchor="w")
-        self.clients_entry = ctk.CTkEntry(cli_frame, width=50, fg_color="transparent", border_width=0, font=("Arial", 20, "bold"), text_color=CYAN)
-        self.clients_entry.insert(0, "15")
-        self.clients_entry.pack(anchor="w")
-        
-        ep_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
-        ep_frame.pack(side="left", padx=15)
-        ctk.CTkLabel(ep_frame, text="Training Rounds:", font=("Arial", 11), text_color=TEXT_SUB).pack(anchor="w")
-        self.epochs_entry = ctk.CTkEntry(ep_frame, width=50, height=28, fg_color="#1a1a24", border_width=1)
-        self.epochs_entry.insert(0, "10")
-        self.epochs_entry.pack(anchor="w")
-        
-        self.start_btn = ctk.CTkButton(settings_frame, text="Start", fg_color=CYAN, text_color="black", hover_color="#00c0cb", width=70, height=35, state="disabled", command=self.start_training)
-        self.start_btn.pack(side="right", padx=(0, 5), pady=(15, 0))
-
-        # --- Middle Panel: FL PIPELINE ---
-        pipe_panel = ctk.CTkFrame(dashboard, fg_color=PANEL_COLOR, corner_radius=10)
-        pipe_panel.pack(fill="x", padx=10, pady=10)
-        
-        ctk.CTkLabel(pipe_panel, text="FEDERATED LEARNING PIPELINE", font=("Arial", 12, "bold"), text_color=TEXT_SUB).pack(anchor="w", padx=15, pady=(15, 0))
-        
-        pipe_content = ctk.CTkFrame(pipe_panel, fg_color="transparent")
-        pipe_content.pack(fill="both", expand=True, padx=15, pady=10)
-        pipe_content.grid_columnconfigure(0, weight=6)
-        pipe_content.grid_columnconfigure(1, weight=4)
-        
-        # Left side: Progress bars
-        prog_frame = ctk.CTkFrame(pipe_content, fg_color="transparent")
-        prog_frame.grid(row=0, column=0, sticky="nsew", pady=10)
-        
-        # Download bar
-        dl_lbl_frame = ctk.CTkFrame(prog_frame, fg_color="transparent")
-        dl_lbl_frame.pack(fill="x")
-        self.dl_status = ctk.CTkLabel(dl_lbl_frame, text="Downloading Data", text_color=TEXT_MAIN)
-        self.dl_status.pack(side="left")
-        self.dl_bar = ctk.CTkProgressBar(prog_frame, progress_color=CYAN)
-        self.dl_bar.set(0)
-        self.dl_bar.pack(fill="x", pady=(5, 15))
-        
-        # Train bar
-        tr_lbl_frame = ctk.CTkFrame(prog_frame, fg_color="transparent")
-        tr_lbl_frame.pack(fill="x")
-        self.tr_status = ctk.CTkLabel(tr_lbl_frame, text="Local Training", text_color=TEXT_MAIN)
-        self.tr_status.pack(side="left")
-        self.tr_bar = ctk.CTkProgressBar(prog_frame, progress_color=PURPLE)
-        self.tr_bar.set(0)
-        self.tr_bar.pack(fill="x", pady=(5, 15))
-        
-        # Upload bar
-        up_lbl_frame = ctk.CTkFrame(prog_frame, fg_color="transparent")
-        up_lbl_frame.pack(fill="x")
-        self.up_status = ctk.CTkLabel(up_lbl_frame, text="Uploading Model Update", text_color=TEXT_MAIN)
-        self.up_status.pack(side="left")
-        self.up_bar = ctk.CTkProgressBar(prog_frame, progress_color="#5a5a7a")
-        self.up_bar.set(0)
-        self.up_bar.pack(fill="x", pady=(5, 5))
-
-        # Right side: Chart
-        chart_frame = ctk.CTkFrame(pipe_content, fg_color="transparent")
-        chart_frame.grid(row=0, column=1, sticky="nsew", padx=10)
-        ctk.CTkLabel(chart_frame, text="LOCAL MODEL ACCURACY", font=("Arial", 11), text_color=TEXT_SUB).pack(anchor="w")
-        
-        self.figure = Figure(figsize=(4, 2.5), dpi=100)
-        self.figure.patch.set_facecolor(PANEL_COLOR)
-        self.ax = self.figure.add_subplot(111)
-        self.ax.set_facecolor(PANEL_COLOR)
-        self.ax.tick_params(colors=TEXT_SUB, labelsize=8)
-        self.ax.spines['bottom'].set_color(TEXT_SUB)
-        self.ax.spines['left'].set_color(TEXT_SUB)
-        self.ax.spines['top'].set_visible(False)
-        self.ax.spines['right'].set_visible(False)
-        self.ax.set_ylim(0, 100)
-        
-        self.lines = []
-        
-        self.canvas = FigureCanvasTkAgg(self.figure, master=chart_frame)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        # --- Data Distribution Panel ---
-        dist_panel = ctk.CTkFrame(dashboard, fg_color=PANEL_COLOR, corner_radius=10)
-        dist_panel.pack(fill="x", padx=10, pady=10)
-        
-        ctk.CTkLabel(dist_panel, text="DATA DISTRIBUTION AMONG VIRTUAL CLIENTS", font=("Arial", 12, "bold"), text_color=TEXT_SUB).pack(anchor="w", padx=15, pady=(15, 5))
-        
-        self.dist_figure = Figure(figsize=(8, 1.8), dpi=100)
-        self.dist_figure.patch.set_facecolor(PANEL_COLOR)
-        self.dist_ax = self.dist_figure.add_subplot(111)
-        self.dist_ax.set_facecolor(PANEL_COLOR)
-        self.dist_ax.tick_params(colors=TEXT_SUB, labelsize=8)
-        self.dist_ax.spines['bottom'].set_color(TEXT_SUB)
-        self.dist_ax.spines['left'].set_color(TEXT_SUB)
-        self.dist_ax.spines['top'].set_visible(False)
-        self.dist_ax.spines['right'].set_visible(False)
-        self.dist_ax.set_ylabel("Samples", color=TEXT_SUB, fontsize=8)
-        
-        self.dist_canvas = FigureCanvasTkAgg(self.dist_figure, master=dist_panel)
-        self.dist_canvas.get_tk_widget().pack(fill="both", expand=True, padx=15, pady=5)
-
-        # --- Bottom Panel: FINAL EVALUATION ---
-        eval_panel = ctk.CTkFrame(dashboard, fg_color=PANEL_COLOR, corner_radius=10)
-        eval_panel.pack(fill="x", padx=10, pady=10)
-        
-        ctk.CTkLabel(eval_panel, text="FINAL MODEL EVALUATION", font=("Arial", 12, "bold"), text_color=TEXT_SUB).pack(anchor="w", padx=15, pady=(15, 5))
-        
-        eval_content = ctk.CTkFrame(eval_panel, fg_color="transparent")
-        eval_content.pack(fill="x", padx=15, pady=10)
-        
-        self.dl_global_btn = ctk.CTkButton(eval_content, text="Final Model Downloaded", fg_color="transparent", border_color=GREEN, border_width=2, text_color=GREEN, state="disabled", command=self.download_global_model)
-        self.dl_global_btn.pack(side="left", padx=20)
-        
-        self.eval_local_btn = ctk.CTkButton(eval_content, text="Evaluate on\nLocal Testset", width=150, height=100, fg_color=PURPLE, text_color="white", hover_color="#3b8bcd", state="disabled", command=self.eval_local_testset)
-        self.eval_local_btn.pack(side="left", padx=20)
-        
-        self.clear_btn = ctk.CTkButton(eval_content, text="Clear &\nReset", width=100, height=100, fg_color="#d32f2f", text_color="white", hover_color="#9a0007", state="disabled", command=self.clear_and_reset)
-        self.clear_btn.pack(side="left", padx=20)
-        
-        # --- Test Tab Setup ---
-        ctk.CTkLabel(test_tab, text="GLOBAL MODEL INFERENCE", font=("Arial", 16, "bold"), text_color=CYAN).pack(pady=(40, 10))
-        
-        self.test_zone = ctk.CTkButton(test_tab, text="Select Image for Testing", width=300, height=200, font=("Arial", 16, "bold"), fg_color="#1a1a24", border_color=TEXT_SUB, border_width=2, hover_color="#2a2a34", command=self.test_image, state="disabled")
-        self.test_zone.pack(pady=20)
-        
-        self.eval_res_lbl = ctk.CTkLabel(test_tab, text="Please download the global model to enable inference.", font=("Arial", 14), text_color=TEXT_SUB)
-        self.eval_res_lbl.pack(pady=20)
-
-        # Initialize real-time hardware profiling
-        self.profile_hardware()
-        self.update_hardware_loop()
-
-    def update_hardware_loop(self):
-        self.profile_hardware()
-        self.after(2000, self.update_hardware_loop)
-
-    def profile_hardware(self):
-        cores = psutil.cpu_count(logical=True)
-        memory_pct = psutil.virtual_memory().percent
-        memory_gb = psutil.virtual_memory().total / (1024 ** 3)
-        
-        # Using psutil.cpu_percent(interval=None) returns instant usage since last call
-        self.cpu_gauge.set(psutil.cpu_percent())
-        self.ram_gauge.set(memory_pct)
-        self.ram_lbl.configure(text=f"RAM USAGE\n{int(memory_pct)}% / {memory_gb:.1f}GB")
-        
-        # Only set suggested clients once
-        if not hasattr(self, '_clients_suggested'):
-            suggested = max(1, int(cores * 1.5))
-            self.clients_entry.delete(0, "end")
-            self.clients_entry.insert(0, str(suggested))
-            self._clients_suggested = True
-
-    def connect_server(self):
-        self.server_ip = self.ip_entry.get().strip()
-        if not self.server_ip:
-            messagebox.showerror("Error", "Please enter a valid Server IP.")
+        if not url or not n_val.isdigit() or not dev_name:
             return
             
-        try:
-            # If it's a raw IP without a port (contains no letters), append :8000
-            if ":" not in self.server_ip and not any(c.isalpha() for c in self.server_ip):
-                self.server_ip += ":8000"
-                
-            local_ip = get_local_ip()
-            response = requests.get(f"http://{self.server_ip}/connect?laptop_id={self.laptop_id}&client_ip={local_ip}", timeout=3)
-            if response.status_code == 200:
-                self.conn_status.configure(text="Connection: 🟢 CONNECTED", text_color=GREEN)
-                self.connect_btn.configure(state="disabled")
-                self.ip_entry.configure(state="disabled")
-                self.start_btn.configure(state="normal")
+        n = int(n_val)
+        
+        success = Client.connect_device(url, n, dev_name)
+        if success:
+            self.btn_connect.configure(state="disabled")
+            self.btn_start.configure(state="normal")
+            
+    def start_process(self):
+        url = self.url_entry.get().strip()
+        n_val = self.n_entry.get().strip()
+        n = int(n_val)
+        
+        self.btn_start.configure(state="disabled", text="Running...")
+        self.btn_stop.configure(state="normal")
+        self.url_entry.configure(state="disabled")
+        self.n_entry.configure(state="disabled")
+        self.dev_entry.configure(state="disabled")
+        self.lbl_pool.configure(text=f"Local Client Pool (N={n})")
+        
+        for widget in self.pool_scroll.winfo_children():
+            widget.destroy()
+            
+        self.progress_bar.set(0)
+        self.progress_bar.pack(side="left", padx=10, expand=True, fill="x")
+        
+        threading.Thread(target=Client.start_process, args=(url, n), daemon=True).start()
+
+    def stop_process(self):
+        Client.stop_process()
+        self.btn_start.configure(state="normal", text="▶ Start Process")
+        self.btn_stop.configure(state="disabled")
+        self.btn_connect.configure(state="normal")
+        
+        self.url_entry.configure(state="normal")
+        self.n_entry.configure(state="normal")
+        self.dev_entry.configure(state="normal")
+        
+        self.progress_bar.pack_forget()
+
+    def browse_image(self):
+        filepath = filedialog.askopenfilename(
+            title="Select Image for Prediction",
+            filetypes=(("Image files", "*.png *.jpg *.jpeg"), ("All files", "*.*"))
+        )
+        if filepath:
+            self.selected_img_path = filepath
+            self.lbl_selected_img.configure(text=f"Selected: {os.path.basename(filepath)}")
+            
+            img = Image.open(filepath)
+            img.thumbnail((150, 150))
+            self.img_preview = ctk.CTkImage(light_image=img, dark_image=img, size=(img.width, img.height))
+            self.lbl_preview.configure(image=self.img_preview, text="")
+
+    def predict(self):
+        if not hasattr(self, 'selected_img_path') or not self.selected_img_path:
+            self.lbl_pred_result.configure(text="Please select an image first.", text_color="red")
+            return
+            
+        model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'local_global_model.pt'))
+        
+        self.lbl_pred_result.configure(text="Predicting...", text_color=CYAN)
+        self.update_idletasks()
+        
+        result = predict_image(model_path, self.selected_img_path)
+        
+        if "Error" in result:
+            self.lbl_pred_result.configure(text=result, text_color="red")
+        else:
+            self.lbl_pred_result.configure(text=f"Prediction: {result.upper()}", text_color=GREEN)
+
+    def select_frame(self, name):
+        # Update button colors
+        for btn_name, btn in self.sidebar_btns.items():
+            if btn_name == name:
+                btn.configure(fg_color=PANEL_COLOR)
             else:
-                self.conn_status.configure(text=f"🔴 Error: {response.status_code}", text_color="red")
-        except Exception as e:
-            self.conn_status.configure(text="🔴 Disconnected (Failed to reach server)", text_color="red")
+                btn.configure(fg_color="transparent")
+                
+        # Show selected frame
+        if self.current_frame is not None:
+            self.current_frame.grid_forget()
+            
+        self.current_frame = self.frames[name]
+        self.current_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
 
-    def start_training(self):
-        try:
-            num_clients = int(self.clients_entry.get())
-            epochs = int(self.epochs_entry.get())
-        except ValueError:
-            messagebox.showerror("Error", "Clients and Epochs must be integers.")
+    def setup_ui(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        
+        # --- SIDEBAR (Left) ---
+        sidebar = ctk.CTkFrame(self, fg_color=SIDEBAR_COLOR, width=200, corner_radius=0)
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.grid_rowconfigure(3, weight=1)
+        
+        ctk.CTkLabel(sidebar, text="FAB-FL Edge", font=("Arial", 22, "bold"), text_color=PURPLE).pack(pady=(20, 30), padx=20)
+        
+        menu_items = ["Home", "Model Prediction"]
+        for item in menu_items:
+            btn = ctk.CTkButton(sidebar, text=item, font=("Arial", 16), fg_color="transparent", text_color=TEXT_MAIN, hover_color=PANEL_COLOR, anchor="w",
+                                command=lambda name=item: self.select_frame(name))
+            btn.pack(fill="x", padx=10, pady=5)
+            self.sidebar_btns[item] = btn
+
+        # --- MAIN CONTENT CONTAINER (Right) ---
+        self.main_container = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_container.grid(row=0, column=1, sticky="nsew")
+        self.main_container.grid_columnconfigure(0, weight=1)
+        self.main_container.grid_rowconfigure(0, weight=1)
+        
+        self.setup_home_frame()
+        self.setup_model_frame()
+
+    def setup_home_frame(self):
+        frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.frames["Home"] = frame
+        
+        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 20))
+        self.lbl_status = ctk.CTkLabel(header, text="Status: Waiting to Connect...", font=("Arial", 16, "bold"), text_color=TEXT_SUB)
+        self.lbl_status.pack(side="right")
+        
+        conn_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        conn_frame.pack(fill="x", pady=5)
+        
+        ctk.CTkLabel(conn_frame, text="Device:", font=("Arial", 14)).pack(side="left", padx=5)
+        self.dev_entry = ctk.CTkEntry(conn_frame, width=100, font=("Arial", 14))
+        self.dev_entry.insert(0, "Laptop-2")
+        self.dev_entry.pack(side="left", padx=5)
+        
+        ctk.CTkLabel(conn_frame, text="Server URL:", font=("Arial", 14)).pack(side="left", padx=5)
+        self.url_entry = ctk.CTkEntry(conn_frame, width=180, font=("Arial", 14))
+        self.url_entry.insert(0, "http://127.0.0.1:8000")
+        self.url_entry.pack(side="left", padx=10)
+        
+        ctk.CTkLabel(conn_frame, text="Clients (N):", font=("Arial", 14)).pack(side="left", padx=5)
+        self.n_entry = ctk.CTkEntry(conn_frame, width=60, font=("Arial", 14))
+        self.n_entry.insert(0, "20")
+        self.n_entry.pack(side="left", padx=10)
+        
+        self.btn_connect = ctk.CTkButton(conn_frame, text="🔌 Connect", fg_color=PURPLE, hover_color="#3a90da", command=self.connect_client)
+        self.btn_connect.pack(side="left", padx=5)
+        
+        self.btn_start = ctk.CTkButton(conn_frame, text="▶ Start Process", fg_color=GREEN, hover_color="#00c853", command=self.start_process, state="disabled")
+        self.btn_start.pack(side="left", padx=5)
+
+        self.btn_stop = ctk.CTkButton(conn_frame, text="⏹ Stop", fg_color="#d62728", hover_color="#b51a1a", command=self.stop_process, state="disabled")
+        self.btn_stop.pack(side="left", padx=5)
+        
+        self.progress_bar = ctk.CTkProgressBar(conn_frame, fg_color="#333", progress_color=CYAN)
+        self.progress_bar.set(0)
+
+        dash_body = ctk.CTkFrame(frame, fg_color="transparent")
+        dash_body.pack(fill="both", expand=True, pady=10)
+        dash_body.grid_columnconfigure((0, 1), weight=1)
+        dash_body.grid_rowconfigure(0, weight=1)
+        
+        pool_frame = ctk.CTkFrame(dash_body, fg_color=PANEL_COLOR, corner_radius=10)
+        pool_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        self.lbl_pool = ctk.CTkLabel(pool_frame, text="Local Client Pool (Waiting...)", font=("Arial", 14, "bold"), text_color=TEXT_SUB)
+        self.lbl_pool.pack(pady=10)
+        self.pool_scroll = ctk.CTkScrollableFrame(pool_frame, fg_color="transparent")
+        self.pool_scroll.pack(fill="both", expand=True, padx=10, pady=10)
+
+        log_frame = ctk.CTkFrame(dash_body, fg_color=PANEL_COLOR, corner_radius=10)
+        log_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        ctk.CTkLabel(log_frame, text="Communication Terminal", font=("Arial", 14, "bold"), text_color=TEXT_SUB).pack(pady=10)
+        self.log_textbox = ctk.CTkTextbox(log_frame, fg_color="#1a1a24", text_color=GREEN, font=("Courier", 12), state="disabled")
+        self.log_textbox.pack(fill="both", expand=True, padx=10, pady=10)
+
+        status_frame = ctk.CTkFrame(frame, fg_color=PANEL_COLOR, corner_radius=10)
+        status_frame.pack(fill="x", pady=10)
+        self.lbl_active = ctk.CTkLabel(status_frame, text="Active Client: None", font=("Arial", 16, "bold"), text_color=CYAN)
+        self.lbl_active.pack(side="left", padx=20, pady=15)
+        self.lbl_memory = ctk.CTkLabel(status_frame, text="", font=("Arial", 14, "bold"), text_color=GREEN)
+        self.lbl_memory.pack(side="right", padx=20, pady=15)
+
+    def setup_model_frame(self):
+        frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.frames["Model Prediction"] = frame
+        ctk.CTkLabel(frame, text="Client-Side Model Inference", font=("Arial", 22, "bold"), text_color=CYAN).pack(pady=(0, 10), anchor="w")
+        ctk.CTkLabel(frame, text="Test the received global model locally.", font=("Arial", 14), text_color=TEXT_SUB).pack(pady=(0, 20), anchor="w")
+        
+        pred_frame = ctk.CTkFrame(frame, fg_color=PANEL_COLOR, corner_radius=10)
+        pred_frame.pack(fill="both", expand=True, pady=10)
+        
+        btn_browse = ctk.CTkButton(pred_frame, text="📁 Browse Image", command=self.browse_image)
+        btn_browse.pack(pady=20)
+        
+        self.lbl_selected_img = ctk.CTkLabel(pred_frame, text="No image selected.", text_color=TEXT_SUB)
+        self.lbl_selected_img.pack(pady=5)
+        
+        self.lbl_preview = ctk.CTkLabel(pred_frame, text="[ Image Preview ]", width=150, height=150, fg_color="#1a1a24")
+        self.lbl_preview.pack(pady=20)
+        
+        btn_predict = ctk.CTkButton(pred_frame, text="🎯 Predict Class", command=self.predict, fg_color=GREEN, hover_color="#00c853")
+        btn_predict.pack(pady=20)
+        
+        self.lbl_pred_result = ctk.CTkLabel(pred_frame, text="", font=("Arial", 24, "bold"))
+        self.lbl_pred_result.pack(pady=10)
+
+    def draw_graph(self, parent_frame, class_counts, total):
+        graph_frame = ctk.CTkFrame(parent_frame, fg_color="transparent", height=15)
+        graph_frame.pack(fill="x", padx=10, pady=(0, 10))
+        
+        if total == 0:
             return
             
-        self.start_btn.configure(state="disabled")
-        threading.Thread(target=self._training_pipeline, args=(num_clients, epochs), daemon=True).start()
+        for c in range(10):
+            count = class_counts.get(c, 0)
+            if count > 0:
+                block = ctk.CTkFrame(graph_frame, fg_color=CLASS_COLORS[c], height=15, corner_radius=2)
+                block.pack(side="left", fill="x", expand=True)
 
-    def _training_pipeline(self, num_clients, epochs):
-        # Config Sync
-        try:
-            requests.get(f"http://{self.server_ip}/update_config?laptop_id={self.laptop_id}&clients={num_clients}&epochs={epochs}")
-        except:
-            pass
-            
-        # Download
-        self.dl_status.configure(text="Downloading Data (Active)")
-        self.dl_bar.configure(progress_color=CYAN)
+    def update_dashboard(self):
+        state = Client.client_state
         
-        try:
-            # Simulate downloading indices from server based on number of clients
-            requests.get(f"http://{self.server_ip}/dataset/indices?laptop_id={self.laptop_id}&clients={num_clients}")
-        except:
-            pass
-            
-        for i in range(101):
-            self.dl_bar.set(i/100)
-            time.sleep(0.02)
-        self.dl_status.configure(text="Data Downloaded")
-        self.dl_bar.configure(progress_color="#5a5a7a")
+        status_text = state['current_status']
+        color = GREEN if status_text == "Connected!" else TEXT_SUB
+        self.lbl_status.configure(text=f"Status: {status_text}", text_color=color)
         
-        # Visualize Data Distribution
-        client_ids = [f"C{i+1}" for i in range(num_clients)]
-        num_classes = 10
-        # Simulate Dirichlet data distribution for 10 classes
-        distribution_matrix = np.zeros((num_classes, num_clients))
-        base_samples = 600
-        for i in range(num_clients):
-            total_samples = np.random.randint(2000, 6001)
-            proportions = np.random.dirichlet(np.repeat(0.5, num_classes))
-            distribution_matrix[:, i] = proportions * total_samples
+        if self.progress_bar.winfo_ismapped():
+            self.progress_bar.set(state["partition_progress"])
         
-        self.dist_ax.clear()
-        self.dist_ax.set_facecolor(PANEL_COLOR)
-        
-        colors = plt.cm.tab10(np.linspace(0, 1, num_classes))
-        bottom = np.zeros(num_clients)
-        client_indices = np.arange(num_clients)
-        
-        for class_id in range(num_classes):
-            self.dist_ax.bar(client_ids, distribution_matrix[class_id], bottom=bottom, 
-                             color=colors[class_id], label=f'C{class_id}', alpha=0.8)
-            bottom += distribution_matrix[class_id]
-            
-        self.dist_ax.tick_params(colors=TEXT_SUB, labelsize=7)
-        self.dist_ax.spines['bottom'].set_color(TEXT_SUB)
-        self.dist_ax.spines['left'].set_color(TEXT_SUB)
-        self.dist_ax.spines['top'].set_visible(False)
-        self.dist_ax.spines['right'].set_visible(False)
-        self.dist_ax.set_ylabel("Data Samples", color=TEXT_SUB, fontsize=8)
-        self.dist_ax.legend(bbox_to_anchor=(1.01, 1), loc='upper left', fontsize=6, title="Classes", title_fontsize=7)
-        self.dist_figure.tight_layout(rect=[0, 0, 0.9, 1])
-        self.dist_canvas.draw()
-        
-        # Train
-        self.tr_bar.configure(progress_color=PURPLE)
-        
-        self.ax.clear()
-        self.ax.set_facecolor(PANEL_COLOR)
-        self.ax.set_ylim(0, 100)
-        self.ax.spines['bottom'].set_color(TEXT_SUB)
-        self.ax.spines['left'].set_color(TEXT_SUB)
-        self.ax.spines['top'].set_visible(False)
-        self.ax.spines['right'].set_visible(False)
-        
-        self.lines = []
-        acc_x = []
-        acc_y_list = [[] for _ in range(num_clients)]
-        
-        colors = plt.cm.tab20(np.linspace(0, 1, num_clients))
-        for i in range(num_clients):
-            line, = self.ax.plot([], [], color=colors[i % 20], linewidth=1.5, alpha=0.8)
-            self.lines.append(line)
-        
-        for r in range(1, epochs + 1):
-            self.tr_status.configure(text=f"Local Training (Round {r}/{epochs})")
-            for c in range(1, num_clients + 1):
-                time.sleep(0.05) # Simulate client training
+        if len(self.pool_scroll.winfo_children()) == 0 and len(state["local_clients"]) > 0:
+            for client in state["local_clients"]:
+                gid = client["global_id"]
+                counts = sum(client["class_counts"].values())
                 
-            # Update chart
-            acc_x.append(r)
-            for i in range(num_clients):
-                noise = np.random.uniform(-3, 3)
-                acc_y_list[i].append(min(95, max(0, 40 + (50 * math.log(r + 1)) + noise)))
-                self.lines[i].set_data(acc_x, acc_y_list[i])
+                row = ctk.CTkFrame(self.pool_scroll, fg_color="#1a1a24", corner_radius=5)
+                row.pack(fill="x", pady=5)
                 
-            self.ax.set_xlim(1, max(epochs, r))
-            self.canvas.draw()
-            
-            self.tr_bar.set(r/epochs)
-            
-        self.tr_status.configure(text="Training Complete")
-        self.tr_bar.configure(progress_color="#5a5a7a")
-        
-        # Simulate local save and upload for each virtual client
-        self.up_status.configure(text=f"Uploading {num_clients} Model Updates (Active)")
-        self.up_bar.configure(progress_color=CYAN)
-        self.up_bar.set(0)
-        
-        for c in range(1, num_clients + 1):
-            model_name = f"local_model_c{c}.pt"
-            with open(model_name, "wb") as f: 
-                f.write(b"dummy")
+                info_frame = ctk.CTkFrame(row, fg_color="transparent")
+                info_frame.pack(fill="x")
+                ctk.CTkLabel(info_frame, text=gid, font=("Arial", 12, "bold")).pack(side="left", padx=10, pady=2)
+                ctk.CTkLabel(info_frame, text=f"Data Samples: {counts}", font=("Arial", 12), text_color=TEXT_SUB).pack(side="right", padx=10, pady=2)
                 
+                self.draw_graph(row, client["class_counts"], counts)
+                
+        active_gid = state["active_training_gid"]
+        for widget in self.pool_scroll.winfo_children():
             try:
-                with open(model_name, "rb") as f:
-                    requests.post(f"http://{self.server_ip}/upload_model?laptop_id={self.laptop_id}&client_id={c}", files={"file": f})
+                info_frame = widget.winfo_children()[0]
+                lbl_gid = info_frame.winfo_children()[0].cget("text")
+                if lbl_gid == active_gid:
+                    widget.configure(border_width=2, border_color=CYAN)
+                else:
+                    widget.configure(border_width=0)
             except:
                 pass
-            
-            # Update bar incrementally
-            self.up_bar.set(c / num_clients)
-            # Add small delay to simulate network latency per model
-            time.sleep(0.05)
-            
-        self.up_status.configure(text=f"All {num_clients} Models Uploaded. Waiting for Global Model...")
-        self.up_bar.configure(progress_color="#5a5a7a")
-        
-        self.poll_global_model()
-
-    def poll_global_model(self):
-        try:
-            resp = requests.get(f"http://{self.server_ip}/global_model/status?laptop_id={self.laptop_id}")
-            if resp.status_code == 200 and resp.json().get("ready"):
-                self.dl_global_btn.configure(state="normal", fg_color=GREEN, text_color="black", text="Download Final Model")
-                return
-        except:
-            pass
-        self.after(2000, self.poll_global_model)
-
-    def download_global_model(self):
-        try:
-            resp = requests.get(f"http://{self.server_ip}/global_model/download")
-            with open("downloaded_global_model.pt", "wb") as f:
-                f.write(resp.content)
-            self.dl_global_btn.configure(text="Final Model Downloaded", state="disabled", fg_color="transparent", text_color=GREEN)
-            self.test_zone.configure(state="normal", text="Select Image for Testing")
-            self.eval_res_lbl.configure(text="Global model ready. Waiting for image upload...")
-            self.eval_local_btn.configure(state="normal")
-            self.clear_btn.configure(state="normal")
-        except:
-            # Fallback for testing GUI without a live server
-            self.dl_global_btn.configure(text="Final Model Downloaded", state="disabled", fg_color="transparent", text_color=GREEN)
-            self.test_zone.configure(state="normal", text="Select Image for Testing")
-            self.eval_res_lbl.configure(text="Global model ready. Waiting for image upload...")
-            self.eval_local_btn.configure(state="normal")
-            self.clear_btn.configure(state="normal")
-            
-    def eval_local_testset(self):
-        self.eval_local_btn.configure(text="Evaluating...", state="disabled")
-        self.update()
-        time.sleep(1.5) # Simulate evaluation
-        self.eval_res_lbl.configure(text="LOCAL TESTSET EVALUATION: Loss: 0.842 | Accuracy: 81.2%")
-        self.eval_local_btn.configure(text="Evaluate on\nLocal Testset", state="normal")
-
-    def test_image(self):
-        file = filedialog.askopenfilename(filetypes=[("Image Files", "*.jpg;*.png;*.jpeg")])
-        if file:
-            filename = os.path.basename(file)
-            self.test_zone.configure(text=f"Image Uploaded:\n{filename}\n\nRunning Inference...")
-            self.update()
-            time.sleep(1) # simulate inference
-            
-            # Random mock classification for CIFAR-10
-            classes = ["Airplane", "Automobile", "Bird", "Cat", "Deer", "Dog", "Frog", "Horse", "Ship", "Truck"]
-            result = np.random.choice(classes)
-            
-            self.eval_res_lbl.configure(text=f"CLASSIFICATION: {result} | File: {filename} | Accuracy: 92.4% | Inference: 0.3s")
-            self.test_zone.configure(text="Test Complete.\nClick to upload another.")
-
-    def clear_and_reset(self):
-        confirm = messagebox.askyesno("Warning", "Are you sure you want to remove the received global model and reset the connection?")
-        if confirm:
-            if os.path.exists("downloaded_global_model.pt"):
-                os.remove("downloaded_global_model.pt")
                 
-            # Reset UI
-            self.conn_status.configure(text="Connection: 🔴 DISCONNECTED", text_color=TEXT_SUB)
-            self.connect_btn.configure(state="normal")
-            self.ip_entry.configure(state="normal")
-            self.start_btn.configure(state="disabled")
+        if active_gid:
+            self.lbl_active.configure(text=f"Active Client: {active_gid} (Training...)")
+        else:
+            self.lbl_active.configure(text="Active Client: None")
             
-            # Reset Bars
-            self.dl_bar.set(0)
-            self.tr_bar.set(0)
-            self.up_bar.set(0)
-            self.dl_status.configure(text="Downloading Data")
-            self.tr_status.configure(text="Local Training")
-            self.up_status.configure(text="Uploading Model Update")
+        self.lbl_memory.configure(text=state["memory_cleared_msg"])
+        
+        if len(state["logs"]) > self.last_log_count:
+            new_logs = state["logs"][self.last_log_count:]
+            self.last_log_count = len(state["logs"])
             
-            # Reset Charts
-            self.dist_ax.clear()
-            self.dist_ax.set_facecolor(PANEL_COLOR)
-            self.dist_canvas.draw()
+            self.log_textbox.configure(state="normal")
+            for log in new_logs:
+                self.log_textbox.insert("end", log + "\n")
+            self.log_textbox.see("end")
+            self.log_textbox.configure(state="disabled")
             
-            self.ax.clear()
-            self.ax.set_facecolor(PANEL_COLOR)
-            self.ax.set_ylim(0, 100)
-            self.ax.spines['bottom'].set_color(TEXT_SUB)
-            self.ax.spines['left'].set_color(TEXT_SUB)
-            self.ax.spines['top'].set_visible(False)
-            self.ax.spines['right'].set_visible(False)
-            self.lines = []
-            self.canvas.draw()
-            
-            # Reset Eval Buttons
-            self.dl_global_btn.configure(text="Final Model Downloaded", state="disabled", fg_color="transparent", text_color=GREEN)
-            self.eval_local_btn.configure(text="Evaluate on\nLocal Testset", state="disabled")
-            self.test_zone.configure(text="Select Image for Testing", state="disabled")
-            self.clear_btn.configure(state="disabled")
-            self.eval_res_lbl.configure(text="Please download the global model to enable inference.")
-            
-            messagebox.showinfo("Reset Successful", "The global model has been removed and the UI is reset. Ready to connect to another server.")
-
-    def refresh_laptop(self):
-        confirm = messagebox.askyesno("Refresh App", "Are you sure you want to completely restart the app? This simulates turning on a brand new laptop.")
-        if confirm:
-            import sys
-            import os
-            os.execl(sys.executable, sys.executable, *sys.argv)
+        self.after(500, self.update_dashboard)
 
 if __name__ == "__main__":
-    app = ClientGUI()
-    app.mainloop()
+    gui = ClientGUI()
+    gui.mainloop()

@@ -29,7 +29,7 @@ def get_cifar10(root_dir='./data'):
     return trainset, testset
 
 
-def dirichlet_partition_cifar10(dataset, num_clients=20, alpha=0.5):
+def dirichlet_partition_cifar10(dataset, num_clients=20, alpha=0.5, progress_callback=None):
     """
     Partitions the dataset across num_clients using a Dirichlet distribution 
     to simulate Non-IID label distribution skew.
@@ -53,6 +53,9 @@ def dirichlet_partition_cifar10(dataset, num_clients=20, alpha=0.5):
     client_class_counts = {i: {c: 0 for c in range(num_classes)} for i in range(num_clients)}
     
     for c in range(num_classes):
+        if progress_callback:
+            progress_callback(c / num_classes)
+            
         # 1. Identify all sample indices for the current class c
         idx_c = np.where(targets == c)[0]
         np.random.shuffle(idx_c)
@@ -82,13 +85,16 @@ def dirichlet_partition_cifar10(dataset, num_clients=20, alpha=0.5):
     for i in range(num_clients):
         np.random.shuffle(client_indices[i])
         
+    if progress_callback:
+        progress_callback(1.0)
+        
     # Wrap partitioned indices into PyTorch Subset objects
     client_datasets = {i: Subset(dataset, client_indices[i]) for i in range(num_clients)}
     
     return client_datasets, client_class_counts
 
 
-def prepare_federated_data(num_clients=20, alpha=0.5, root_dir='./data'):
+def prepare_federated_data(num_clients=20, alpha=0.5, root_dir='./data', progress_callback=None):
     """
     Main entry point for Phase 1 data preparation.
     """
@@ -97,7 +103,7 @@ def prepare_federated_data(num_clients=20, alpha=0.5, root_dir='./data'):
     
     trainset, testset = get_cifar10(root_dir=root_dir)
     client_datasets, client_class_counts = dirichlet_partition_cifar10(
-        trainset, num_clients=num_clients, alpha=alpha)
+        trainset, num_clients=num_clients, alpha=alpha, progress_callback=progress_callback)
         
     return client_datasets, client_class_counts, testset
 
