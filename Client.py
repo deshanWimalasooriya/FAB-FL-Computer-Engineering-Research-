@@ -57,14 +57,14 @@ def connect_device(server_url="http://127.0.0.1:8000", N=20, device_name="Laptop
         client_state["current_status"] = "Server Unreachable"
         return False
 
-def start_process(server_url="http://127.0.0.1:8000", N=20):
+def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5):
     client_state["stop_flag"] = False
     
     # 1. Initialize dataset and non-IID partitioning
-    log(f"Initializing {N} virtual clients locally and partitioning data...")
+    log(f"Initializing {N} virtual clients locally and partitioning data with alpha={alpha:.2f}...")
     client_state["current_status"] = "Partitioning Data (Downloading if needed)..."
     client_datasets, client_class_counts, _ = prepare_federated_data(
-        num_clients=N, alpha=0.5, progress_callback=update_progress
+        num_clients=N, alpha=alpha, progress_callback=update_progress
     )
     
     if client_state["stop_flag"]:
@@ -72,6 +72,8 @@ def start_process(server_url="http://127.0.0.1:8000", N=20):
         return
         
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type != 'cuda':
+        log("WARNING: CUDA is not available. Using CPU. This will be severely slow!")
     log(f"Using device: {device}")
 
     # 2. Registration Handshake
@@ -170,13 +172,14 @@ def start_process(server_url="http://127.0.0.1:8000", N=20):
                     
                     # Instantiate fresh model
                     model = models.resnet18(num_classes=10)
-                    model.load_state_dict(torch.load(global_model_path, weights_only=True))
+                    model.load_state_dict(torch.load(global_model_path, map_location=device, weights_only=True))
                     model = model.to(device)
                     
                     criterion = nn.CrossEntropyLoss()
                     optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
                     
-                    dataloader = DataLoader(client_datasets[idx], batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+                    loader_kwargs = {'pin_memory': True, 'num_workers': 2, 'prefetch_factor': 2} if device.type == 'cuda' else {}
+                    dataloader = DataLoader(client_datasets[idx], batch_size=BATCH_SIZE, shuffle=True, drop_last=True, **loader_kwargs)
                     
                     model.train()
                     for epoch in range(EPOCHS):

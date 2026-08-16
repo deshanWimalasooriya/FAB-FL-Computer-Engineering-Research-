@@ -7,6 +7,8 @@ import ray
 import numpy as np
 import gc
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 @ray.remote
 class ClientNode:
     def __init__(self, client_id, dataset_split, batch_size=32, local_epochs=10, learning_rate=0.01):
@@ -28,9 +30,6 @@ class ClientNode:
         
         # DataLoader for local training
         self.dataloader = DataLoader(self.dataset_split, batch_size=self.batch_size, shuffle=True)
-        
-        # Determine device (CPU primarily for this simulation)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # --- Simulated Hardware Constraints ---
         # Simulated hardware capability factor (e.g., FLOPS). 
@@ -87,7 +86,7 @@ class ClientNode:
         """
         model = self.model
         model.load_state_dict(global_model_state_dict)
-        model.to(self.device)
+        model.to(device)
         model.train()
         
         criterion = nn.CrossEntropyLoss()
@@ -99,7 +98,7 @@ class ClientNode:
             total_samples = 0
             
             for data, target in self.dataloader:
-                data, target = data.to(self.device), target.to(self.device)
+                data, target = data.to(device), target.to(device)
                 
                 optimizer.zero_grad()
                 output = model(data)

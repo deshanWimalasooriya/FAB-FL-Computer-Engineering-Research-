@@ -33,57 +33,59 @@ def dirichlet_partition_cifar10(dataset, num_clients=20, alpha=0.5, progress_cal
     """
     Partitions the dataset across num_clients using a Dirichlet distribution 
     to simulate Non-IID label distribution skew.
-    
-    Math/Logic: 
-    For each class c, we sample a probability vector from a Dirichlet distribution:
-        p_c ~ Dir(alpha)
-    where p_c is a vector of length `num_clients`.
-    This vector dictates the proportion of class c's samples assigned to each client.
-    Smaller alpha values lead to higher heterogeneity (Non-IID).
+    Runs on CUDA to accelerate the array permutations and Dirichlet sampling.
     """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Data partitioning using device: {device}")
+    
     num_classes = 10
     
-    # Retrieve all targets (labels) from the dataset
-    targets = np.array(dataset.targets)
+    # Retrieve all targets (labels) from the dataset, move to CUDA
+    targets = torch.tensor(dataset.targets, device=device)
     
     # Initialize lists to hold indices assigned to each client
     client_indices = [[] for _ in range(num_clients)]
     
-    # Metadata dictionary to track class frequencies per client (f_i^c calculation precursor)
+    # Metadata dictionary to track class frequencies per client
     client_class_counts = {i: {c: 0 for c in range(num_classes)} for i in range(num_clients)}
+    
+    # PyTorch Dirichlet distribution on GPU
+    dirichlet_dist = torch.distributions.dirichlet.Dirichlet(torch.full((num_clients,), alpha, device=device))
     
     for c in range(num_classes):
         if progress_callback:
             progress_callback(c / num_classes)
             
         # 1. Identify all sample indices for the current class c
-        idx_c = np.where(targets == c)[0]
-        np.random.shuffle(idx_c)
+        idx_c = torch.where(targets == c)[0]
+        idx_c = idx_c[torch.randperm(len(idx_c), device=device)]
         num_samples_c = len(idx_c)
         
         # 2. Sample allocation proportions from Dirichlet distribution
-        # p_c ~ Dir(alpha * [1, 1, ..., 1])
-        proportions = np.random.dirichlet(np.repeat(alpha, num_clients))
+        proportions = dirichlet_dist.sample()
         
         # 3. Convert proportions to absolute sample counts per client
-        counts = (proportions * num_samples_c).astype(int)
+        counts = (proportions * num_samples_c).to(torch.int32)
         
         # 4. Handle remainder due to integer truncation to ensure all samples are assigned
-        remainder = num_samples_c - counts.sum()
+        remainder = num_samples_c - counts.sum().item()
         if remainder > 0:
-            counts[np.random.choice(num_clients, remainder, replace=False)] += 1
+            add_idx = torch.randperm(num_clients, device=device)[:remainder]
+            counts[add_idx] += 1
             
         # 5. Split the class indices according to the computed counts
-        split_indices = np.split(idx_c, np.cumsum(counts)[:-1])
+        split_indices = torch.split(idx_c, counts.tolist())
         
         # 6. Assign split subsets to respective clients and update metadata
         for i in range(num_clients):
-            client_indices[i].extend(split_indices[i].tolist())
+            client_indices[i].extend(split_indices[i].cpu().tolist())
             client_class_counts[i][c] = len(split_indices[i])
             
     # Shuffle the assigned indices within each client's partition to ensure mixed batches during training
     for i in range(num_clients):
-        np.random.shuffle(client_indices[i])
+        idx_tensor = torch.tensor(client_indices[i])
+        shuffled = idx_tensor[torch.randperm(len(idx_tensor))]
+        client_indices[i] = shuffled.tolist()
         
     if progress_callback:
         progress_callback(1.0)

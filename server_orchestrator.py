@@ -7,6 +7,8 @@ import copy
 import gc
 from torch.utils.data import DataLoader
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # Import custom modules from previous phases
 from dataset import prepare_federated_data, plot_client_data_distribution
 from freqsel_filter import evaluate_all_distances
@@ -26,12 +28,12 @@ def fedavg_aggregate(global_model, client_weights_list):
     # Initialize avg_weights with zeros mapping to global model architecture
     for k in client_weights_list[0].keys():
         # Ensure tensor is cast correctly and detached
-        avg_weights[k] = torch.zeros_like(torch.as_tensor(client_weights_list[0][k]), dtype=torch.float32)
+        avg_weights[k] = torch.zeros_like(torch.as_tensor(client_weights_list[0][k], device=device), dtype=torch.float32, device=device)
         
     # Sum all weights from the selected cohort
     for client_weights in client_weights_list:
         for k in client_weights.keys():
-            avg_weights[k] += torch.as_tensor(client_weights[k])
+            avg_weights[k] += torch.as_tensor(client_weights[k], device=device)
             
     # Divide by m to get the average
     for k in avg_weights.keys():
@@ -52,7 +54,6 @@ def evaluate_global_model(global_model, testset):
     """
     Evaluates the global model on the global test dataset.
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     global_model.to(device)
     global_model.eval()
     
@@ -104,6 +105,7 @@ def main():
     
     # 3. Initialize Global Model and Server State
     global_model = create_global_model()
+    global_model.to(device)
     
     # 4. Instantiate Ray Remote Client Nodes (Phase 4)
     print("\nInitializing Ray Remote Client Nodes...")

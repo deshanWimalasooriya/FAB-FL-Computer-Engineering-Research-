@@ -49,7 +49,7 @@ class ConnectDeviceRequest(BaseModel):
 class SetParamsRequest(BaseModel):
     max_rounds: int
     m: int
-    k: int
+    k: float
 
 
 # --- 1. Registration Handshake ---
