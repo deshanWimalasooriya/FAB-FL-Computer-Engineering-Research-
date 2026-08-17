@@ -115,6 +115,22 @@ def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5):
             log(f"Failed to register client {i}: {e}")
             return
             
+    # Launch background thread to listen for server termination during training
+    import threading
+    def monitor_server_stop():
+        while not client_state["stop_flag"]:
+            try:
+                status_res = requests.get(f"{server_url}/status", timeout=1).json()
+                if status_res.get("stop_flag", False):
+                    client_state["stop_flag"] = True
+                    log("Server sent stop signal. Terminating local training...")
+                    break
+            except Exception:
+                pass
+            time.sleep(2)
+            
+    threading.Thread(target=monitor_server_stop, daemon=True).start()
+            
     # 3. Polling Loop
     local_round = 0
     log("\nWaiting for Server to start training rounds...")
@@ -123,6 +139,11 @@ def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5):
     while not client_state["stop_flag"]:
         try:
             status_res = requests.get(f"{server_url}/status").json()
+            if status_res.get("stop_flag", False):
+                log("Server sent stop signal. Terminating local training...")
+                client_state["stop_flag"] = True
+                break
+                
             server_round = status_res.get("round", 0)
             in_progress = status_res.get("round_in_progress", False)
             selected_gids = status_res.get("selected_clients", [])

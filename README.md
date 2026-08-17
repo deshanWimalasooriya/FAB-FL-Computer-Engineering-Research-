@@ -32,42 +32,61 @@ The FAB-FL framework is built on a modern, decoupled client-server architecture 
 
 ## 2. Mathematical Formulation & Workflow
 
-The core methodology of FAB-FL relies on mathematically quantifying the utility of selecting a client based on its data richness and its hardware speed.
+The core methodology of FAB-FL relies on mathematically quantifying the utility of selecting a client based on its data richness and its hardware speed, ensuring robust convergence even under severe data heterogeneity.
 
-### 2.1 Non-IID Dirichlet Partitioning
-To simulate Non-IID data environments realistically on the CIFAR-10 dataset, we sample label distributions from a Dirichlet distribution. For each class $c$, the allocation of samples across $N$ clients is determined by a probability vector $\vec{p}_c$:
+### 2.1 Data Partitioning (Non-IID Generation)
+To simulate a real-world, highly skewed non-IID environment on the CIFAR-10 dataset, we partition the data across clients using a Dirichlet distribution. Let $C = 10$ be the total number of classes, and $N$ be the total number of clients. For each class $c \in \{1, \dots, C\}$, we sample a probability vector $p_c$ that dictates how the samples of class $c$ are distributed across the $N$ clients:
 
-$$ \vec{p}_c \sim Dir(\alpha \cdot \vec{1}) $$
+$$ p_c = (p_{c,1}, p_{c,2}, \dots, p_{c,N}) \sim \text{Dir}(\alpha \mathbf{1}_N) $$
 
-Where $\alpha$ acts as the concentration parameter. A smaller $\alpha$ (e.g., $0.1$) leads to a highly heterogeneous, strictly partitioned Non-IID space, while a larger $\alpha$ trends toward uniform IID distributions.
+Given the hyperparameter $\alpha = 0.5$, the probability density function for the Dirichlet distribution of class $c$ across $N$ clients is:
 
-### 2.2 FREQSEL: Frequency-Aware Data Utility
-To mitigate bias, the server calculates the pairwise distance of class distributions. Let $C_i$ represent the class frequency vector of client $i$. The data distance $D_i$ measures how divergent client $i$'s local data is from the optimal uniform distribution. We convert this to a normalized utility metric $U_i$, where lower distance implies higher data utility:
+$$ f(p_c; \alpha) = \frac{\Gamma(N\alpha)}{\Gamma(\alpha)^N} \prod_{i=1}^N p_{c,i}^{\alpha-1} $$
 
-$$ U_i = \text{MinMaxNorm}(1.0 - D_i) $$
+- $p_{c,i}$ represents the exact proportion of available samples of class $c$ that are allocated to client $i$.
+- $\alpha = 0.5$ creates a heavily skewed distribution, simulating severe data heterogeneity.
+- The constraint $\sum_{i=1}^N p_{c,i} = 1$ ensures all data for class $c$ is assigned.
 
-### 2.3 BSFL: Bandwidth and Speed Normalization
-Stragglers disrupt the synchronized aggregation in Federated Learning. The server tracks the computational latency/bandwidth speed $S_i$ (in milliseconds) for each client. The system favors faster clients by computing the inverse speed and normalizing it:
+### 2.2 FREQSEL Candidate Filtering (With Penalty)
+The goal of FREQSEL is to filter the total pool of $N$ clients down to an initial candidate pool $K$ ($|K| < N$) by selecting clients whose local data distributions are closest to the global distribution $Q$. We measure the distance using the Kullback-Leibler (KL) Divergence:
 
-$$ V_i = \text{MinMaxNorm}\left(\frac{1}{S_i + \epsilon}\right) $$
+$$ D_{KL}(P_i \parallel Q) = \sum_{c=1}^C P_i(c) \log\left(\frac{P_i(c)}{Q(c)}\right) $$
 
-### 2.4 Joint UCB Selection Policy
-To avoid greedy algorithms permanently starving clients with unique but slow data, FAB-FL employs the **Upper Confidence Bound (UCB)** algorithm. This perfectly balances **exploitation** (selecting fast clients with good data) and **exploration** (selecting rarely-used clients to ensure fairness).
+To prevent "Class Starvation" mathematically, we minimize this divergence across the selected clients while adding a heavy penalty. The initial candidate pool $K$ is the subset $S \subset \{1, \dots, N\}$ that minimizes:
 
-For round $t$, the UCB score $Q_i(t)$ for client $i$ is calculated as:
+$$ K = \arg\min_{\substack{S \subset \{1..N\} \\ |S|=k}} \left( \sum_{i \in S} D_{KL}(P_i \parallel Q) + \lambda \sum_{c=1}^C \max\left(0, \gamma - \sum_{i \in S} P_i(c)\right) \right) $$
 
-$$ \text{Exploitation}_i = \lambda_1 U_i + \lambda_2 V_i $$
+- $\sum_{i \in S} D_{KL}(P_i \parallel Q)$: The cumulative divergence from the global ideal.
+- $\lambda$: A massive scaling penalty coefficient (e.g., $10^6$).
+- $\gamma$: The starvation threshold. If any class $c$ falls below this threshold, the heavy penalty forces the algorithm to reject that combination.
 
-$$ \text{Exploration}_i = c \sqrt{\frac{\ln(t)}{N_k(i) + \epsilon}} $$
+### 2.3 Algorithmic Fallback: Dynamic K-Scaling
+If the mathematical penalty in FREQSEL still yields a candidate pool missing a critical class, we implement a programmatic Dynamic K-Scaling logic loop to guarantee class coverage without discarding optimized clients.
 
-$$ Q_i(t) = \text{Exploitation}_i + \text{Exploration}_i $$
+1. **Verify Coverage**: Let $U_K = \bigcup_{i \in K} \{c \mid P_i(c) > 0\}$ be the set of unique classes present in the initial pool $K$.
+2. **Evaluate**: If $|U_K| < C$ (a class is missing), identify the missing class $c_{\text{miss}} \notin U_K$.
+3. **Dynamic Expansion**: We dynamically expand the candidate pool size. Increment pool size $K_{\text{new}} = K + 1$.
+4. **Selection & Addition**: Find the client $j \notin K$ in the excluded pool that possesses the maximum density of $c_{\text{miss}}$. Append client $j$ to the pool: $K_{\text{new}} \leftarrow K \cup \{j\}$.
+5. **Termination**: Repeat $K_{\text{new}} \leftarrow K_{\text{new}} + 1$ until $|U_{K_{\text{new}}}| = C$.
 
-Where:
-- $\lambda_1, \lambda_2$ are weighting hyperparameters for data utility and hardware speed.
-- $N_k(i)$ tracks how many times client $i$ has been selected in past rounds.
-- $c$ controls the degree of exploration.
+### 2.4 BSFL Final Scheduling (UCB Formulation)
+From the dynamically scaled candidate pool $K_{\text{new}}$, we select the final subset of $m$ clients for communication round $t$ using the Upper Confidence Bound (UCB) algorithm.
 
-In each communication round, the server sorts $Q_i(t)$ and dynamically selects the top $m$ clients to participate.
+$$ A_t = \arg\max_{\substack{S \subset K_{\text{new}} \\ |S|=m}} \sum_{i \in S} \left( R_i + c \sqrt{\frac{\ln t}{N_i}} \right) $$
+
+- $A_t$: The final selected set of $m$ clients.
+- $R_i$: Historical empirical reward (exploitation), inversely proportional to latency.
+- $c$: Exploration hyperparameter.
+- $N_i$: Total times client $i$ has been selected prior to round $t$. The term $\sqrt{\frac{\ln t}{N_i}}$ forces exploration of rarely sampled clients.
+
+### 2.5 Global Model Aggregation
+The central server aggregates the locally trained ResNet-18 updates from the $m$ scheduled clients using Federated Averaging (FedAvg).
+
+$$ w_{t+1} = \sum_{i \in A_t} \frac{n_i}{n_{A_t}} w_{t+1}^i \quad \text{where} \quad n_{A_t} = \sum_{i \in A_t} n_i $$
+
+- $w_{t+1}$: The newly aggregated global model weights for round $t + 1$.
+- $w_{t+1}^i$: The locally updated weights from client $i$.
+- $\frac{n_i}{n_{A_t}}$: The weighting coefficient based on the number of local data samples $n_i$, ensuring statistically robust updates.
 
 ---
 

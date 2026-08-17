@@ -11,7 +11,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Import custom modules from previous phases
 from dataset import prepare_federated_data, plot_client_data_distribution
-from freqsel_filter import evaluate_all_distances
+from freqsel_filter import select_candidates
 from bsfl_scheduler import BSFLScheduler
 from client_node import ClientNode
 
@@ -128,12 +128,12 @@ def main():
         print(f"\n--- Round {round_num} ---")
         
         # --- Stage 1: Metadata Collection & Evaluation (Phase 2) ---
-        all_clients = list(range(N))
-        candidate_distances = evaluate_all_distances(client_class_counts)
-        print(f"Evaluated all {N} clients' statistical distances.")
+        # k=7 since N=10 in this simulation
+        candidate_pool, candidate_distances = select_candidates(client_class_counts, k=7)
+        print(f"FREQSEL Filtered Candidate Pool (|K|={len(candidate_pool)}): {candidate_pool}")
         
         # --- Stage 2: BSFL Scheduling (Phase 3) ---
-        selected_clients = scheduler.schedule(all_clients, candidate_distances)
+        selected_clients = scheduler.schedule(candidate_pool)
         print(f"BSFL Selected Clients (m={m}): {selected_clients}")
         
         # --- Stage 3: Local Training via Ray ---

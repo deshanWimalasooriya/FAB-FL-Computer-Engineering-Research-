@@ -12,8 +12,7 @@ from pydantic import BaseModel
 from typing import Dict, List, Any
 import numpy as np
 
-# We import the distance evaluation function from your existing script
-from freqsel_filter import evaluate_all_distances
+from freqsel_filter import select_candidates
 
 app = FastAPI(title="FAB-FL Server", version="2.0")
 
@@ -29,10 +28,12 @@ class ServerState:
         self.m = 3 # number of clients to select per round
         self.k = 1 # k parameter
         
+        self.candidate_pool = []
         self.selected_clients = []
         self.uploaded_models: Dict[str, bytes] = {}
         self.global_model_path = "global_model.pt"
         self.round_in_progress = False
+        self.stop_requested = False
 
 state = ServerState()
 
@@ -100,66 +101,82 @@ def auto_trigger_round():
     time.sleep(3)
     start_round()
 
+@app.post("/reset")
+def reset_server():
+    state.clients.clear()
+    state.temp_to_global.clear()
+    state.connected_devices.clear()
+    state.current_round = 0
+    state.candidate_pool = []
+    state.selected_clients = []
+    state.uploaded_models.clear()
+    state.round_in_progress = False
+    state.stop_requested = False
+    if os.path.exists(state.global_model_path):
+        try:
+            os.remove(state.global_model_path)
+        except Exception:
+            pass
+    print("\n[SERVER] State has been completely reset.")
+    return {"status": "success"}
+
 # --- 2. UCB Joint Scoring ---
 def run_ucb_selection():
     N = len(state.clients)
     if N == 0:
         return []
     
-    # 1. Compute Data Distances using FREQSEL logic
-    # Reformat class counts for evaluate_all_distances {idx: {c: count}}
     idx_to_gid = list(state.clients.keys())
     formatted_counts = {idx: state.clients[gid]["class_counts"] for idx, gid in enumerate(idx_to_gid)}
     
-    distances_dict = evaluate_all_distances(formatted_counts)
+    # 1. FREQSEL Candidate Filtering
+    # Use user-defined state.k, bounded by N-1
+    initial_k = max(1, min(int(state.k), N - 1)) if N > 1 else 1
+    candidate_pool_idx, all_distances_dict = select_candidates(formatted_counts, k=initial_k)
     
-    # 2. Extract arrays for UCB
-    distances = np.array([distances_dict[idx] for idx in range(N)])
-    speeds = np.array([state.clients[gid]["hardware_speed_ms"] for gid in idx_to_gid])
-    N_k = np.array([state.clients[gid]["N_k"] for gid in idx_to_gid])
+    # Update GUI distances for ALL clients immediately
+    for idx, gid in enumerate(idx_to_gid):
+        state.clients[gid]["distance"] = all_distances_dict[idx]
     
-    # Invert distance for utility (lower distance = higher utility)
-    utility = 1.0 - distances 
+    # Convert indices back to global IDs
+    candidate_gids = [idx_to_gid[idx] for idx in candidate_pool_idx]
+    state.candidate_pool = candidate_gids
     
-    # Normalize utility and speeds [0, 1]
+    # 2. Extract arrays for UCB (BSFL)
+    speeds = np.array([state.clients[gid]["hardware_speed_ms"] for gid in candidate_gids])
+    N_k_counts = np.array([state.clients[gid]["N_k"] for gid in candidate_gids])
+    
     def min_max_norm(arr):
         if np.max(arr) == np.min(arr): return np.ones_like(arr)
         return (arr - np.min(arr)) / (np.max(arr) - np.min(arr))
     
-    utility_norm = min_max_norm(utility)
-    # For speed, lower ms is better, so invert before normalizing
+    # R_i is normalized computational speed (inverse latency)
     speed_inv = 1.0 / (speeds + 1e-9)
-    speed_norm = min_max_norm(speed_inv)
+    R_i = min_max_norm(speed_inv)
     
     # UCB Parameters
-    alpha = 0.5
-    beta = 0.5
     c = 1.0
     t = state.current_round + 1 # avoid ln(0)
     
     ucb_scores = []
-    for i in range(N):
-        exploitation = (alpha * utility_norm[i]) + (beta * speed_norm[i])
-        exploration = c * math.sqrt(math.log(t) / (N_k[i] + 1e-9))
+    for i in range(len(candidate_gids)):
+        gid = candidate_gids[i]
         
+        exploitation = R_i[i]
+        exploration = c * math.sqrt(math.log(t) / (N_k_counts[i] + 1e-9))
         
         # If never selected, force exploration by assigning infinity
-        score = float('inf') if N_k[i] == 0 else exploitation + exploration
+        score = float('inf') if N_k_counts[i] == 0 else exploitation + exploration
         ucb_scores.append(score)
         
         # Save to state for GUI
-        gid = idx_to_gid[i]
-        state.clients[gid]["distance"] = distances[i]
         state.clients[gid]["ucb_score"] = score
         
     # Select top m clients
-    top_m_idx = np.argsort(ucb_scores)[-state.m:]
-    
-    # In case m > N, select all N
-    if state.m > N:
-        top_m_idx = np.argsort(ucb_scores)[-N:]
+    actual_m = min(state.m, len(candidate_gids))
+    top_m_idx = np.argsort(ucb_scores)[-actual_m:]
         
-    selected_gids = [idx_to_gid[idx] for idx in top_m_idx]
+    selected_gids = [candidate_gids[idx] for idx in top_m_idx]
     
     # Update N_k for selected clients
     for gid in selected_gids:
@@ -188,8 +205,16 @@ def get_status():
         "round": state.current_round,
         "round_in_progress": state.round_in_progress,
         "selected_clients": state.selected_clients,
-        "clients_registered": len(state.clients)
+        "clients_registered": len(state.clients),
+        "stop_flag": state.stop_requested
     }
+
+@app.post("/stop_training")
+def stop_training():
+    state.stop_requested = True
+    state.round_in_progress = False
+    print("\n[SERVER] Training stop requested. Devices will be notified.")
+    return {"status": "stopped"}
 
 # --- 4. Model Distribution & Aggregation ---
 @app.get("/get_model")

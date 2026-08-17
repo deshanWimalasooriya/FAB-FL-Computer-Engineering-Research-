@@ -38,8 +38,10 @@ def predict_image(model_path, image_path):
         
         with torch.no_grad():
             outputs = model(tensor)
-            _, predicted = torch.max(outputs, 1)
+            probabilities = torch.nn.functional.softmax(outputs, dim=1)[0]
+            _, predicted = torch.max(probabilities, 0)
             
-        return CIFAR10_CLASSES[predicted.item()]
+        probs_dict = {CIFAR10_CLASSES[i]: probabilities[i].item() for i in range(10)}
+        return {"class": CIFAR10_CLASSES[predicted.item()], "probabilities": probs_dict}
     except Exception as e:
         return f"Prediction Error: {str(e)}"

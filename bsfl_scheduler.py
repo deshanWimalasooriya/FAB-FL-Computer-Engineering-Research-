@@ -2,7 +2,7 @@ import numpy as np
 import math
 
 class BSFLScheduler:
-    def __init__(self, num_clients=20, m=5, ucb_c=2.0, alpha_reward=0.5, beta_reward=0.5):
+    def __init__(self, num_clients=20, m=5, ucb_c=2.0):
         """
         Initializes the BSFL Scheduler.
         
@@ -10,16 +10,10 @@ class BSFLScheduler:
             num_clients: Total number of clients in the system (N=20).
             m: Number of clients to select in the final cohort (m=5).
             ucb_c: Exploration parameter 'c' for the UCB algorithm.
-            alpha_reward: Weight for the data quality (FREQSEL distance) in the reward function.
-            beta_reward: Weight for the computational speed in the reward function.
         """
         self.num_clients = num_clients
         self.m = m
         self.ucb_c = ucb_c
-        
-        # Reward function balancing weights
-        self.alpha_reward = alpha_reward
-        self.beta_reward = beta_reward
         
         # --- UCB Tracking Variables ---
         # N_k(t): Number of times client k has been selected
@@ -52,82 +46,54 @@ class BSFLScheduler:
             old_speed = self.estimated_speeds[client_id]
             self.estimated_speeds[client_id] = old_speed + (speed - old_speed) / n
 
-    def calculate_ucb_speed(self, all_clients):
+    def calculate_ucb_scores(self, candidate_pool):
         r"""
-        Calculates the UCB speed metric for all N clients.
+        Calculates the UCB score for clients in the candidate pool.
         
         Math:
-        UCB_{k,t} = \mu_k(t) + c * \sqrt{ \ln(t) / N_k(t) }
+        A_t = R_i + c * \sqrt{ \ln(t) / N_i }
+        Where R_i is normalized historical speed.
         """
         ucb_scores = {}
-        for k in all_clients:
+        
+        # Normalize speeds (R_i)
+        speeds = np.array([self.estimated_speeds[k] for k in candidate_pool])
+        def min_max_norm(arr):
+            ptp = np.ptp(arr)
+            return (arr - np.min(arr)) / ptp if ptp > 0 else np.zeros_like(arr)
+            
+        R_i = min_max_norm(speeds)
+        
+        for idx, k in enumerate(candidate_pool):
             if self.selection_counts[k] == 0:
                 # If a client has never been selected, grant infinite UCB score 
                 # to strongly encourage exploration of unknown clients.
                 ucb_scores[k] = float('inf')
             else:
-                exploitation = self.estimated_speeds[k]
+                exploitation = R_i[idx]
                 exploration = self.ucb_c * math.sqrt(math.log(self.total_rounds) / self.selection_counts[k])
                 ucb_scores[k] = exploitation + exploration
                 
         return ucb_scores
 
-    def schedule(self, all_clients, candidate_distances):
+    def schedule(self, candidate_pool):
         """
         Phase 3: Scheduling Stage (BSFL).
-        Selects the final m clients from all N clients based on the combined reward A_t.
-        
-        Math:
-        Reward A_{k,t} = \alpha * (1 - normalized_distance_k) + \beta * normalized_ucb_speed_k
-        We maximize A_{k,t} to balance fast convergence (low distance) and low latency (high speed).
+        Selects the final m clients from the dynamically scaled candidate pool K_new.
         """
-        # 1. Calculate UCB speeds for all clients
-        ucb_scores = self.calculate_ucb_speed(all_clients)
+        # Ensure we don't try to select more than what's available
+        actual_m = min(self.m, len(candidate_pool))
+        if actual_m == 0:
+            return []
+            
+        # 1. Calculate UCB scores
+        ucb_scores = self.calculate_ucb_scores(candidate_pool)
         
-        selected = []
-        remaining_m = self.m
+        # 2. Select top m clients
+        # Sort clients by UCB score descending
+        sorted_candidates = sorted(candidate_pool, key=lambda k: ucb_scores[k], reverse=True)
         
-        # 2. Edge Case Handling: Initial rounds where some UCB scores are infinity (unexplored)
-        # Prioritize exploring these clients, breaking ties using their FREQSEL distances.
-        unexplored = [k for k in all_clients if ucb_scores[k] == float('inf')]
-        if len(unexplored) > 0:
-            # Sort unexplored clients by distance (lower distance is better)
-            unexplored.sort(key=lambda k: candidate_distances[k])
-            
-            if len(unexplored) >= self.m:
-                return unexplored[:self.m]
-            else:
-                # Take all unexplored, and fill the rest by maximizing reward for explored
-                selected = unexplored
-                remaining_m = self.m - len(unexplored)
-                # Filter all_clients to only explored clients for reward calculation
-                all_clients = [k for k in all_clients if k not in unexplored]
-                
-        # 3. Normalize Distances and UCB speeds for fair combination in the reward function
-        # Because we are processing all N clients, min_max_norm correctly scales globally across the active system.
-        if len(all_clients) > 0:
-            d_values = np.array([candidate_distances[k] for k in all_clients])
-            u_values = np.array([ucb_scores[k] for k in all_clients])
-            
-            def min_max_norm(arr):
-                ptp = np.ptp(arr)
-                return (arr - np.min(arr)) / ptp if ptp > 0 else np.zeros_like(arr)
-                
-            norm_d = min_max_norm(d_values)
-            norm_u = min_max_norm(u_values)
-            
-            # 4. Calculate Combined Reward A_{k,t}
-            # We want to minimize distance (so we maximize 1 - norm_d) and maximize speed (norm_u)
-            rewards = self.alpha_reward * (1.0 - norm_d) + self.beta_reward * norm_u
-            
-            # 5. Select the top 'remaining_m' clients maximizing the reward
-            # np.argsort sorts ascending, so we take the last elements and reverse them
-            best_indices = np.argsort(rewards)[-remaining_m:][::-1]
-            
-            for idx in best_indices:
-                selected.append(all_clients[idx])
-                
-        return selected
+        return sorted_candidates[:actual_m]
 
 # Example execution if run directly
 if __name__ == "__main__":
@@ -135,14 +101,13 @@ if __name__ == "__main__":
     scheduler = BSFLScheduler(num_clients=20, m=5)
     
     # Mock data arriving from Phase 2 (FREQSEL)
-    mock_all_clients = list(range(20)) # N=20
-    mock_distances = {k: np.random.uniform(0.1, 0.9) for k in mock_all_clients}
+    mock_candidate_pool = list(range(10)) # K_new has 10 clients
     
-    # First round - selects top 5 based purely on distance (since speeds are UCB=inf)
-    selected_m = scheduler.schedule(mock_all_clients, mock_distances)
-    print(f"Round 1 (Exploration) Selected clients: {selected_m}")
+    # First round
+    selected_m = scheduler.schedule(mock_candidate_pool)
+    print(f"Round 1 Selected clients: {selected_m}")
     
-    # Simulate finishing the round and recording simulated latencies
+    # Simulate finishing the round
     mock_latencies = {k: np.random.uniform(10.0, 50.0) for k in selected_m}
     scheduler.update_speed_records(selected_m, mock_latencies)
     print(f"Updated speed estimations for selected: {scheduler.estimated_speeds[selected_m]}")
