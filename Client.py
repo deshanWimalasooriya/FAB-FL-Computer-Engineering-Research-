@@ -33,7 +33,7 @@ def log(msg):
 def update_progress(val):
     client_state["partition_progress"] = val
 
-def connect_device(server_url="http://127.0.0.1:8000", N=20, device_name="Laptop-2"):
+def connect_device(server_url="http://127.0.0.1:8000", N=20, device_name="Laptop-2", hardware_name="NVIDIA Jetson"):
     log(f"=== FAB-FL Client Simulator ({device_name}) ===")
     
     # Connect Device First
@@ -42,7 +42,8 @@ def connect_device(server_url="http://127.0.0.1:8000", N=20, device_name="Laptop
     try:
         res = requests.post(f"{server_url}/connect_device", json={
             "device_name": device_name,
-            "num_clients": N
+            "num_clients": N,
+            "hardware_name": hardware_name
         }).json()
         if res.get("status") == "success":
             client_state["current_status"] = "Connected!"
@@ -58,212 +59,220 @@ def connect_device(server_url="http://127.0.0.1:8000", N=20, device_name="Laptop
         return False
 
 def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5):
-    client_state["stop_flag"] = False
-    
-    # 1. Initialize dataset and non-IID partitioning
-    log(f"Initializing {N} virtual clients locally and partitioning data with alpha={alpha:.2f}...")
-    client_state["current_status"] = "Partitioning Data (Downloading if needed)..."
-    client_datasets, client_class_counts, _ = prepare_federated_data(
-        num_clients=N, alpha=alpha, progress_callback=update_progress
-    )
-    
-    if client_state["stop_flag"]:
-        log("Process stopped.")
-        return
+    try:
+        client_state["stop_flag"] = False
         
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type != 'cuda':
-        log("WARNING: CUDA is not available. Using CPU. This will be severely slow!")
-    log(f"Using device: {device}")
-
-    # 2. Registration Handshake
-    local_idx_to_global = {}
-    log(f"Registering clients with Server at {server_url}...")
-    client_state["current_status"] = "Registering..."
+        # 1. Initialize dataset and non-IID partitioning
+        log(f"Initializing {N} virtual clients locally and partitioning data with alpha={alpha:.2f}...")
+        client_state["current_status"] = "Partitioning Data (Downloading if needed)..."
+        client_datasets, client_class_counts, _ = prepare_federated_data(
+            num_clients=N, alpha=alpha, progress_callback=update_progress
+        )
     
-    # Clear local clients for fresh start
-    client_state["local_clients"] = []
-    
-    for i in range(N):
         if client_state["stop_flag"]:
-            log("Process stopped during registration.")
+            log("Process stopped.")
             return
-            
-        temp_id = f"FFC-{i:04d}"
         
-        # Simulate initial hardware speed for registration
-        import random
-        initial_speed = random.uniform(20.0, 50.0)
-        
-        payload = {
-            "temp_id": temp_id,
-            "class_counts": client_class_counts[i],
-            "hardware_speed_ms": initial_speed
-        }
-        
-        try:
-            res = requests.post(f"{server_url}/register", json=payload).json()
-            global_id = res["global_id"]
-            local_idx_to_global[i] = global_id
-            log(f"  Registered {temp_id} -> {global_id}")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device.type != 'cuda':
+            log("WARNING: CUDA is not available. Using CPU. This will be severely slow!")
+        log(f"Using device: {device}")
+
+        # 2. Registration Handshake
+        local_idx_to_global = {}
+        log(f"Registering clients with Server at {server_url}...")
+        client_state["current_status"] = "Registering..."
+    
+        # Clear local clients for fresh start
+        client_state["local_clients"] = []
+    
+        for i in range(N):
+            if client_state["stop_flag"]:
+                log("Process stopped during registration.")
+                return
             
-            client_state["local_clients"].append({
-                "global_id": global_id,
-                "class_counts": client_class_counts[i]
-            })
-        except Exception as e:
-            log(f"Failed to register client {i}: {e}")
-            return
+            temp_id = f"FFC-{i:04d}"
+        
+            # Simulate initial hardware speed for registration
+            import random
+            initial_speed = random.uniform(20.0, 50.0)
+        
+            payload = {
+                "temp_id": temp_id,
+                "class_counts": client_class_counts[i],
+                "hardware_speed_ms": initial_speed
+            }
+        
+            try:
+                res = requests.post(f"{server_url}/register", json=payload).json()
+                global_id = res["global_id"]
+                local_idx_to_global[i] = global_id
+                log(f"  Registered {temp_id} -> {global_id}")
             
-    # Launch background thread to listen for server termination during training
-    import threading
-    def monitor_server_stop():
+                client_state["local_clients"].append({
+                    "global_id": global_id,
+                    "class_counts": client_class_counts[i]
+                })
+            except Exception as e:
+                log(f"Failed to register client {i}: {e}")
+                return
+            
+        # Launch background thread to listen for server termination during training
+        import threading
+        def monitor_server_stop():
+            while not client_state["stop_flag"]:
+                try:
+                    status_res = requests.get(f"{server_url}/status", timeout=1).json()
+                    if status_res.get("stop_flag", False):
+                        client_state["stop_flag"] = True
+                        log("Server sent stop signal. Terminating local training...")
+                        break
+                except Exception:
+                    pass
+                time.sleep(2)
+            
+        threading.Thread(target=monitor_server_stop, daemon=True).start()
+            
+        # 3. Polling Loop
+        local_round = 0
+        log("\nWaiting for Server to start training rounds...")
+        client_state["current_status"] = "Waiting for Server..."
+    
         while not client_state["stop_flag"]:
             try:
-                status_res = requests.get(f"{server_url}/status", timeout=1).json()
+                status_res = requests.get(f"{server_url}/status").json()
                 if status_res.get("stop_flag", False):
-                    client_state["stop_flag"] = True
                     log("Server sent stop signal. Terminating local training...")
+                    client_state["stop_flag"] = True
                     break
-            except Exception:
-                pass
-            time.sleep(2)
-            
-    threading.Thread(target=monitor_server_stop, daemon=True).start()
-            
-    # 3. Polling Loop
-    local_round = 0
-    log("\nWaiting for Server to start training rounds...")
-    client_state["current_status"] = "Waiting for Server..."
-    
-    while not client_state["stop_flag"]:
-        try:
-            status_res = requests.get(f"{server_url}/status").json()
-            if status_res.get("stop_flag", False):
-                log("Server sent stop signal. Terminating local training...")
-                client_state["stop_flag"] = True
-                break
                 
-            server_round = status_res.get("round", 0)
-            in_progress = status_res.get("round_in_progress", False)
-            selected_gids = status_res.get("selected_clients", [])
+                server_round = status_res.get("round", 0)
+                in_progress = status_res.get("round_in_progress", False)
+                selected_gids = status_res.get("selected_clients", [])
             
-            if in_progress and server_round > local_round:
-                log(f"\n--- Round {server_round} Started ---")
-                local_round = server_round
-                client_state["current_status"] = f"Round {server_round} in progress..."
+                if in_progress and server_round > local_round:
+                    log(f"\n--- Round {server_round} Started ---")
+                    local_round = server_round
+                    client_state["current_status"] = f"Round {server_round} in progress..."
                 
-                # Find which of our local clients were selected
-                our_selected = []
-                for idx, gid in local_idx_to_global.items():
-                    if gid in selected_gids:
-                        our_selected.append((idx, gid))
+                    # Find which of our local clients were selected
+                    our_selected = []
+                    for idx, gid in local_idx_to_global.items():
+                        if gid in selected_gids:
+                            our_selected.append((idx, gid))
                         
-                if not our_selected:
-                    log("None of our local clients were selected for this round.")
-                    client_state["current_status"] = "Idle (Not Selected)"
-                    time.sleep(2)
-                    continue
+                    if not our_selected:
+                        log("None of our local clients were selected for this round.")
+                        client_state["current_status"] = "Idle (Not Selected)"
+                        time.sleep(2)
+                        continue
                     
-                log(f"Our selected clients: {[gid for _, gid in our_selected]}")
+                    log(f"Our selected clients: {[gid for _, gid in our_selected]}")
                 
-                # 4. Download Global Model
-                representative_gid = our_selected[0][1]
-                log(f"Downloading global model via {representative_gid}...")
-                model_res = requests.get(f"{server_url}/get_model", params={"global_id": representative_gid})
+                    # 4. Download Global Model
+                    representative_gid = our_selected[0][1]
+                    log(f"Downloading global model via {representative_gid}...")
+                    model_res = requests.get(f"{server_url}/get_model", params={"global_id": representative_gid})
                 
-                if model_res.status_code != 200:
-                    log("Failed to download global model.")
-                    time.sleep(2)
-                    continue
+                    if model_res.status_code != 200:
+                        log("Failed to download global model.")
+                        time.sleep(2)
+                        continue
                     
-                global_model_path = "local_global_model.pt"
-                with open(global_model_path, "wb") as f:
-                    f.write(model_res.content)
+                    global_model_path = "local_global_model.pt"
+                    with open(global_model_path, "wb") as f:
+                        f.write(model_res.content)
                     
-                # 5. Sequential Training & Strict Memory Management
-                for idx, gid in our_selected:
-                    if client_state["stop_flag"]:
-                        break
-                        
-                    client_state["active_training_gid"] = gid
-                    client_state["current_status"] = f"Training {gid}..."
-                    log(f"[{gid}] Starting local training...")
-                    start_time = time.time()
-                    
-                    # Instantiate fresh model
-                    model = models.resnet18(num_classes=10)
-                    model.load_state_dict(torch.load(global_model_path, map_location=device, weights_only=True))
-                    model = model.to(device)
-                    
-                    criterion = nn.CrossEntropyLoss()
-                    optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
-                    
-                    loader_kwargs = {'pin_memory': True, 'num_workers': 2, 'prefetch_factor': 2} if device.type == 'cuda' else {}
-                    dataloader = DataLoader(client_datasets[idx], batch_size=BATCH_SIZE, shuffle=True, drop_last=True, **loader_kwargs)
-                    
-                    model.train()
-                    for epoch in range(EPOCHS):
+                    # 5. Sequential Training & Strict Memory Management
+                    for idx, gid in our_selected:
                         if client_state["stop_flag"]:
                             break
-                        for inputs, labels in dataloader:
+                        
+                        client_state["active_training_gid"] = gid
+                        client_state["current_status"] = f"Training {gid}..."
+                        log(f"[{gid}] Starting local training...")
+                        start_time = time.time()
+                    
+                        # Instantiate fresh model
+                        model = models.resnet18(num_classes=10)
+                        model.load_state_dict(torch.load(global_model_path, map_location=device, weights_only=True))
+                        model = model.to(device)
+                    
+                        criterion = nn.CrossEntropyLoss()
+                        optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+                    
+                        loader_kwargs = {'pin_memory': True, 'num_workers': 2, 'prefetch_factor': 2} if device.type == 'cuda' else {}
+                        dataloader = DataLoader(client_datasets[idx], batch_size=BATCH_SIZE, shuffle=True, drop_last=True, **loader_kwargs)
+                    
+                        model.train()
+                        for epoch in range(EPOCHS):
                             if client_state["stop_flag"]:
                                 break
-                            inputs, labels = inputs.to(device), labels.to(device)
-                            optimizer.zero_grad()
-                            outputs = model(inputs)
-                            loss = criterion(outputs, labels)
-                            loss.backward()
-                            optimizer.step()
+                            for inputs, labels in dataloader:
+                                if client_state["stop_flag"]:
+                                    break
+                                inputs, labels = inputs.to(device), labels.to(device)
+                                optimizer.zero_grad()
+                                outputs = model(inputs)
+                                loss = criterion(outputs, labels)
+                                loss.backward()
+                                optimizer.step()
                             
-                    train_time_ms = (time.time() - start_time) * 1000
-                    log(f"[{gid}] Training completed in {train_time_ms:.2f} ms")
+                        train_time_ms = (time.time() - start_time) * 1000
+                        log(f"[{gid}] Training completed in {train_time_ms:.2f} ms")
                     
-                    # Save to memory buffer
-                    buffer = io.BytesIO()
-                    model = model.cpu()
-                    torch.save(model.state_dict(), buffer)
-                    buffer.seek(0)
+                        # Save to memory buffer
+                        buffer = io.BytesIO()
+                        model = model.cpu()
+                        torch.save(model.state_dict(), buffer)
+                        buffer.seek(0)
                     
-                    # Memory Cleanup
-                    del model
-                    del optimizer
-                    del criterion
-                    del inputs
-                    del labels
-                    del outputs
-                    del loss
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    gc.collect()
+                        # Memory Cleanup
+                        del model
+                        del optimizer
+                        del criterion
+                        del inputs
+                        del labels
+                        del outputs
+                        del loss
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        gc.collect()
                     
-                    client_state["memory_cleared_msg"] = f"Memory cleared for {gid}"
-                    log(f"[{gid}] Executed: del model, torch.cuda.empty_cache(), gc.collect()")
+                        client_state["memory_cleared_msg"] = f"Memory cleared for {gid}"
+                        log(f"[{gid}] Executed: del model, torch.cuda.empty_cache(), gc.collect()")
                     
-                    if client_state["stop_flag"]:
-                        break
+                        if client_state["stop_flag"]:
+                            break
                         
-                    # Upload model
-                    client_state["current_status"] = f"Uploading {gid}..."
-                    files = {"file": (f"{gid}.pt", buffer, "application/octet-stream")}
-                    params = {"global_id": gid, "hardware_speed_ms": train_time_ms}
-                    upload_res = requests.post(f"{server_url}/upload_model", params=params, files=files)
+                        # Upload model
+                        client_state["current_status"] = f"Uploading {gid}..."
+                        files = {"file": (f"{gid}.pt", buffer, "application/octet-stream")}
+                        params = {"global_id": gid, "hardware_speed_ms": train_time_ms}
+                        upload_res = requests.post(f"{server_url}/upload_model", params=params, files=files)
                     
-                    if upload_res.status_code == 200:
-                        log(f"[{gid}] Successfully uploaded weights.")
-                    else:
-                        log(f"[{gid}] Failed to upload weights: {upload_res.text}")
+                        if upload_res.status_code == 200:
+                            log(f"[{gid}] Successfully uploaded weights.")
+                        else:
+                            log(f"[{gid}] Failed to upload weights: {upload_res.text}")
                 
-                client_state["active_training_gid"] = None
-                client_state["current_status"] = "Waiting for Server..."
+                    client_state["active_training_gid"] = None
+                    client_state["current_status"] = "Waiting for Server..."
                         
-        except requests.exceptions.ConnectionError:
-            pass # Server might be down, just wait
+            except requests.exceptions.ConnectionError:
+                pass # Server might be down, just wait
             
-        time.sleep(2) # Poll every 2 seconds
+            time.sleep(2) # Poll every 2 seconds
         
-    client_state["current_status"] = "Stopped"
-    log("Loop terminated.")
+        client_state["current_status"] = "Stopped"
+        log("Loop terminated.")
+    
+    except Exception as e:
+        log(f"ERROR: {str(e)}")
+        import traceback
+        log(traceback.format_exc())
+        client_state["current_status"] = "Error Occurred"
+
 
 def stop_process():
     client_state["stop_flag"] = True
