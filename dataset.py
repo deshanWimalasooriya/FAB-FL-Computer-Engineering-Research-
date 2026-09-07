@@ -4,8 +4,21 @@ import torchvision.transforms as transforms
 import numpy as np
 from torch.utils.data import Subset
 import matplotlib.pyplot as plt
+import ssl
 
-def get_cifar10(root_dir='./data'):
+# Fix for PyInstaller SSL certificate issues when downloading datasets
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
+
+import os
+
+def get_cifar10(root_dir=None):
+    if root_dir is None:
+        root_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
     """
     Downloads and prepares the CIFAR-10 dataset with standard augmentations.
     """
@@ -96,7 +109,9 @@ def dirichlet_partition_cifar10(dataset, num_clients=20, alpha=0.5, progress_cal
     return client_datasets, client_class_counts
 
 
-def prepare_federated_data(num_clients=20, alpha=0.5, root_dir='./data', progress_callback=None):
+def prepare_federated_data(num_clients=20, alpha=0.5, root_dir=None, progress_callback=None):
+    if root_dir is None:
+        root_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
     """
     Main entry point for Phase 1 data preparation.
     """
