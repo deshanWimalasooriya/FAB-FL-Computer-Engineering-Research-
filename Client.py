@@ -195,6 +195,8 @@ def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5):
                     
                         # Instantiate fresh model
                         model = models.resnet18(num_classes=10)
+                        model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+                        model.maxpool = nn.Identity()
                         model.load_state_dict(torch.load(global_model_path, map_location=device, weights_only=True))
                         model = model.to(device)
                     

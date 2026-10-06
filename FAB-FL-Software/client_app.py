@@ -9,7 +9,7 @@ from PIL import Image
 # Add parent directory to path to import backend logic
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import Client
-from predictor import predict_image
+from predictor import predict_image, predict_multiple_and_save
 
 # --- Styling Constants ---
 BG_COLOR = "#121212"
@@ -48,13 +48,14 @@ class ClientGUI(ctk.CTk):
         url = self.url_entry.get().strip()
         n_val = self.n_entry.get().strip()
         dev_name = self.dev_entry.get().strip()
+        hw_name = self.hw_entry.get().strip()
         
-        if not url or not n_val.isdigit() or not dev_name:
+        if not url or not n_val.isdigit() or not dev_name or not hw_name:
             return
             
         n = int(n_val)
         
-        success = Client.connect_device(url, n, dev_name)
+        success = Client.connect_device(url, n, dev_name, hw_name)
         if success:
             self.btn_connect.configure(state="disabled")
             self.btn_start.configure(state="normal")
@@ -92,35 +93,70 @@ class ClientGUI(ctk.CTk):
         self.alpha_slider.configure(state="normal")
 
     def browse_image(self):
-        filepath = filedialog.askopenfilename(
-            title="Select Image for Prediction",
+        filepaths = filedialog.askopenfilenames(
+            title="Select Images for Prediction (Max 10)",
             filetypes=(("Image files", "*.png *.jpg *.jpeg"), ("All files", "*.*"))
         )
-        if filepath:
-            self.selected_img_path = filepath
-            self.lbl_selected_img.configure(text=f"Selected: {os.path.basename(filepath)}")
+        if filepaths:
+            if len(filepaths) > 10:
+                self.lbl_pred_result.configure(text="Please select up to 10 images only.", text_color="red")
+                filepaths = filepaths[:10]
+                
+            self.selected_img_paths = filepaths
+            self.lbl_selected_img.configure(text=f"Selected {len(filepaths)} image(s)")
             
-            img = Image.open(filepath)
+            # Show preview of the first image
+            img = Image.open(filepaths[0])
             img.thumbnail((150, 150))
             self.img_preview = ctk.CTkImage(light_image=img, dark_image=img, size=(img.width, img.height))
-            self.lbl_preview.configure(image=self.img_preview, text="")
+            
+            preview_txt = "" if len(filepaths) == 1 else f"+ {len(filepaths)-1} more"
+            self.lbl_preview.configure(image=self.img_preview, text=preview_txt)
 
     def predict(self):
-        if not hasattr(self, 'selected_img_path') or not self.selected_img_path:
-            self.lbl_pred_result.configure(text="Please select an image first.", text_color="red")
+        if not hasattr(self, 'selected_img_paths') or not self.selected_img_paths:
+            self.lbl_pred_result.configure(text="Please select images first.", text_color="red")
             return
             
         model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'local_global_model.pt'))
         
-        self.lbl_pred_result.configure(text="Predicting...", text_color=YELLOW)
+        self.lbl_pred_result.configure(text=f"Predicting {len(self.selected_img_paths)} images...", text_color=YELLOW)
         self.update_idletasks()
         
-        result = predict_image(model_path, self.selected_img_path)
+        result_text = ""
+        for img_path in self.selected_img_paths:
+            res = predict_image(model_path, img_path)
+            basename = os.path.basename(img_path)
+            if isinstance(res, str) and "Error" in res:
+                result_text += f"{basename}: {res}\n"
+            else:
+                best_class = res["class"]
+                prob = res["probabilities"][best_class] * 100
+                result_text += f"{basename}: {best_class.upper()} ({prob:.1f}%)\n"
+                
+        self.lbl_pred_result.configure(text=result_text, text_color=GREEN, font=("Arial", 14))
+        self.btn_save_preds.configure(state="normal")
+
+    def save_predictions(self):
+        if not hasattr(self, 'selected_img_paths') or not self.selected_img_paths:
+            return
+            
+        model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'local_global_model.pt'))
         
-        if "Error" in result:
-            self.lbl_pred_result.configure(text=result, text_color="red")
+        save_dir = filedialog.askdirectory(title="Select Directory to Save Prediction Results")
+        if not save_dir:
+            return
+            
+        self.lbl_pred_result.configure(text=f"Saving {len(self.selected_img_paths)} images...", text_color=YELLOW)
+        self.update_idletasks()
+        
+        results = predict_multiple_and_save(model_path, self.selected_img_paths, save_dir)
+        
+        if len(results) > 0 and "error" in results[0] and len(results[0]) == 1:
+            self.lbl_pred_result.configure(text=results[0]["error"], text_color="red")
         else:
-            self.lbl_pred_result.configure(text=f"Prediction: {result.upper()}", text_color=GREEN)
+            success_count = sum(1 for r in results if "error" not in r)
+            self.lbl_pred_result.configure(text=f"Successfully saved {success_count} images to:\n{save_dir}", text_color=GREEN, font=("Arial", 14))
 
     def select_frame(self, name):
         # Update button colors
@@ -213,6 +249,7 @@ class ClientGUI(ctk.CTk):
         ctk.CTkLabel(conn_frame, text="CONNECTION SETUP", font=("Arial", 12, "bold"), text_color=TEXT_MAIN).pack(anchor="nw", padx=15, pady=(15, 5))
         
         self.dev_entry = self.add_input(conn_frame, "Device Name:", "Laptop-2")
+        self.hw_entry = self.add_input(conn_frame, "Hardware:", "NVIDIA Jetson")
         self.url_entry = self.add_input(conn_frame, "Server URL:", "http://127.0.0.1:8000")
         self.n_entry = self.add_input(conn_frame, "Clients (N):", "5")
         
@@ -316,9 +353,12 @@ class ClientGUI(ctk.CTk):
         self.lbl_preview.pack(pady=20)
         
         btn_predict = ctk.CTkButton(pred_frame, text="🎯 Predict Class", command=self.predict, fg_color=YELLOW, text_color="black", hover_color="#cccc00")
-        btn_predict.pack(pady=20)
+        btn_predict.pack(pady=10)
         
-        self.lbl_pred_result = ctk.CTkLabel(pred_frame, text="", font=("Arial", 24, "bold"))
+        self.btn_save_preds = ctk.CTkButton(pred_frame, text="💾 Save Results as Images", command=self.save_predictions, fg_color="transparent", border_width=1, border_color=YELLOW, text_color=YELLOW, hover_color="#333300", state="disabled")
+        self.btn_save_preds.pack(pady=10)
+        
+        self.lbl_pred_result = ctk.CTkLabel(pred_frame, text="", font=("Arial", 16, "bold"), justify="left")
         self.lbl_pred_result.pack(pady=10)
 
     def setup_settings_frame(self):
@@ -334,11 +374,15 @@ class ClientGUI(ctk.CTk):
         if total == 0:
             return
             
+        col = 0
         for c in range(10):
-            count = class_counts.get(c, 0)
+            # Check for both integer and string keys to be safe
+            count = class_counts.get(c, class_counts.get(str(c), 0))
             if count > 0:
+                graph_frame.grid_columnconfigure(col, weight=count)
                 block = ctk.CTkFrame(graph_frame, fg_color=CLASS_COLORS[c], height=20, corner_radius=2)
-                block.pack(side="left", fill="x", expand=True, padx=1)
+                block.grid(row=0, column=col, sticky="ew", padx=1)
+                col += 1
 
     def update_dashboard(self):
         state = Client.client_state
@@ -404,5 +448,7 @@ class ClientGUI(ctk.CTk):
         self.after(500, self.update_dashboard)
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     gui = ClientGUI()
     gui.mainloop()

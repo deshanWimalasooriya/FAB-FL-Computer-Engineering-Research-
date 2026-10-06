@@ -10,7 +10,7 @@ def compute_local_frequencies(client_class_counts, num_classes=10):
     f_i = np.zeros((num_clients, num_classes))
     
     for i in range(num_clients):
-        counts = np.array([client_class_counts[i][c] for c in range(num_classes)])
+        counts = np.array([client_class_counts[i].get(c, 0) for c in range(num_classes)])
         total_samples = np.sum(counts)
         if total_samples > 0:
             f_i[i] = counts / total_samples
@@ -74,7 +74,7 @@ def select_candidates(client_class_counts, num_classes=10, k=7, lambda_pen=1e6, 
     covered_classes = set()
     for i in K_pool:
         for c in range(num_classes):
-            if client_class_counts[i][c] > 0:
+            if client_class_counts[i].get(c, 0) > 0:
                 covered_classes.add(c)
                 
     K_new = set(K_pool)
@@ -93,7 +93,7 @@ def select_candidates(client_class_counts, num_classes=10, k=7, lambda_pen=1e6, 
         
         # Update covered classes with best_j's data
         for c in range(num_classes):
-            if client_class_counts[best_j][c] > 0:
+            if client_class_counts[best_j].get(c, 0) > 0:
                 covered_classes.add(c)
                 
     final_K = list(K_new)

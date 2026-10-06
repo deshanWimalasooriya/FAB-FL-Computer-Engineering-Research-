@@ -54,7 +54,10 @@ def dirichlet_partition_cifar10(dataset, num_clients=20, alpha=0.5, progress_cal
     num_classes = 10
     
     # Retrieve all targets (labels) from the dataset, move to CUDA
-    targets = torch.tensor(dataset.targets, device=device)
+    if isinstance(dataset, Subset):
+        targets = torch.tensor([dataset.dataset.targets[i] for i in dataset.indices], device=device)
+    else:
+        targets = torch.tensor(dataset.targets, device=device)
     
     # Initialize lists to hold indices assigned to each client
     client_indices = [[] for _ in range(num_clients)]
@@ -109,7 +112,49 @@ def dirichlet_partition_cifar10(dataset, num_clients=20, alpha=0.5, progress_cal
     return client_datasets, client_class_counts
 
 
-def prepare_federated_data(num_clients=20, alpha=0.5, root_dir=None, progress_callback=None):
+def iid_partition_cifar10(dataset, num_clients=20, progress_callback=None):
+    """
+    Partitions the dataset perfectly uniformly across clients (Fully IID).
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"IID Data partitioning using device: {device}")
+    
+    num_classes = 10
+    
+    if isinstance(dataset, Subset):
+        targets = torch.tensor([dataset.dataset.targets[i] for i in dataset.indices], device=device)
+    else:
+        targets = torch.tensor(dataset.targets, device=device)
+        
+    client_indices = [[] for _ in range(num_clients)]
+    client_class_counts = {i: {c: 0 for c in range(num_classes)} for i in range(num_clients)}
+    
+    total_samples = len(dataset)
+    indices = torch.randperm(total_samples).tolist()
+    
+    samples_per_client = total_samples // num_clients
+    
+    for i in range(num_clients):
+        start_idx = i * samples_per_client
+        # Give remaining samples to the last client
+        end_idx = start_idx + samples_per_client if i < num_clients - 1 else total_samples
+            
+        client_idx = indices[start_idx:end_idx]
+        client_indices[i] = client_idx
+        
+        # Count classes to return metadata
+        for idx in client_idx:
+            c = targets[idx].item()
+            client_class_counts[i][c] += 1
+            
+        if progress_callback:
+            progress_callback((i + 1) / num_clients)
+            
+    client_datasets = {i: Subset(dataset, client_indices[i]) for i in range(num_clients)}
+    return client_datasets, client_class_counts
+
+
+def prepare_federated_data(num_clients=20, alpha=0.5, root_dir=None, progress_callback=None, samples_per_client=None):
     if root_dir is None:
         root_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
     """
@@ -117,10 +162,22 @@ def prepare_federated_data(num_clients=20, alpha=0.5, root_dir=None, progress_ca
     """
     # Fix seed for reproducibility in simulation
     np.random.seed(42)
+    torch.manual_seed(42)
     
     trainset, testset = get_cifar10(root_dir=root_dir)
-    client_datasets, client_class_counts = dirichlet_partition_cifar10(
-        trainset, num_clients=num_clients, alpha=alpha, progress_callback=progress_callback)
+    
+    if samples_per_client is not None:
+        total_samples = num_clients * samples_per_client
+        if total_samples < len(trainset):
+            indices = np.random.choice(len(trainset), total_samples, replace=False)
+            trainset = Subset(trainset, indices)
+
+    if alpha == 'iid' or alpha is None:
+        client_datasets, client_class_counts = iid_partition_cifar10(
+            trainset, num_clients=num_clients, progress_callback=progress_callback)
+    else:
+        client_datasets, client_class_counts = dirichlet_partition_cifar10(
+            trainset, num_clients=num_clients, alpha=alpha, progress_callback=progress_callback)
         
     return client_datasets, client_class_counts, testset
 

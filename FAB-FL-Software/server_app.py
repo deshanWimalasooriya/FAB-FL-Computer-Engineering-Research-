@@ -5,6 +5,10 @@ import time
 import sys
 import os
 import socket
+import asyncio
+
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
@@ -15,7 +19,7 @@ from PIL import Image
 # Add parent directory to path to import backend logic
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from Server import app, state
-from predictor import predict_image
+from predictor import predict_image, predict_multiple_and_save
 
 # --- Styling Constants ---
 BG_COLOR = "#121212"
@@ -29,14 +33,17 @@ TEXT_SUB = "#cccccc"
 ctk.set_appearance_mode("Dark")
 
 class StdoutRedirector:
-    def __init__(self, text_widget):
+    def __init__(self, text_widget, after_method):
         self.text_widget = text_widget
+        self.after = after_method
         
     def write(self, string):
-        self.text_widget.configure(state="normal")
-        self.text_widget.insert("end", string)
-        self.text_widget.see("end")
-        self.text_widget.configure(state="disabled")
+        def _write():
+            self.text_widget.configure(state="normal")
+            self.text_widget.insert("end", string)
+            self.text_widget.see("end")
+            self.text_widget.configure(state="disabled")
+        self.after(0, _write)
         
     def flush(self):
         pass
@@ -139,6 +146,14 @@ class ServerGUI(ctk.CTk):
             pass
         self.update_dashboard()
 
+    def toggle_freqsel(self):
+        try:
+            is_enabled = self.freqsel_switch_var.get()
+            import requests
+            requests.post("http://127.0.0.1:8000/toggle_freqsel", json={"enabled": is_enabled}, timeout=2)
+        except Exception:
+            pass
+
     def restart_fastapi(self):
         self.stop_fastapi()
         self.after(1000, self.start_fastapi)
@@ -178,43 +193,70 @@ class ServerGUI(ctk.CTk):
             self.lbl_progress_clients.configure(text="0/0 Clients")
 
     def browse_image(self):
-        filepath = filedialog.askopenfilename(
-            title="Select Image for Prediction",
+        filepaths = filedialog.askopenfilenames(
+            title="Select Images for Prediction (Max 10)",
             filetypes=(("Image files", "*.png *.jpg *.jpeg"), ("All files", "*.*"))
         )
-        if filepath:
-            self.selected_img_path = filepath
-            self.lbl_selected_img.configure(text=f"Selected: {os.path.basename(filepath)}")
+        if filepaths:
+            if len(filepaths) > 10:
+                self.lbl_pred_result.configure(text="Please select up to 10 images only.", text_color="red")
+                filepaths = filepaths[:10]
+                
+            self.selected_img_paths = filepaths
+            self.lbl_selected_img.configure(text=f"Selected {len(filepaths)} image(s)")
             
-            img = Image.open(filepath)
+            # Show preview of the first image
+            img = Image.open(filepaths[0])
             img.thumbnail((150, 150))
             self.img_preview = ctk.CTkImage(light_image=img, dark_image=img, size=(img.width, img.height))
-            self.lbl_preview.configure(image=self.img_preview, text="")
+            
+            preview_txt = "" if len(filepaths) == 1 else f"+ {len(filepaths)-1} more"
+            self.lbl_preview.configure(image=self.img_preview, text=preview_txt)
 
     def predict(self):
-        if not hasattr(self, 'selected_img_path') or not self.selected_img_path:
-            self.lbl_pred_result.configure(text="Please select an image first.", text_color="red")
+        if not hasattr(self, 'selected_img_paths') or not self.selected_img_paths:
+            self.lbl_pred_result.configure(text="Please select images first.", text_color="red")
             return
             
         model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'global_model.pt'))
         
-        self.lbl_pred_result.configure(text="Predicting...", text_color=YELLOW)
+        self.lbl_pred_result.configure(text=f"Predicting {len(self.selected_img_paths)} images...", text_color=YELLOW)
         self.update_idletasks()
         
-        result = predict_image(model_path, self.selected_img_path)
-        
-        if isinstance(result, str) and "Error" in result:
-            self.lbl_pred_result.configure(text=result, text_color="red")
-        else:
-            best_class = result["class"]
-            probs = result["probabilities"]
-            
-            pred_text = f"Prediction: {best_class.upper()} ({probs[best_class]*100:.1f}%)\n\n"
-            sorted_probs = sorted(probs.items(), key=lambda x: x[1], reverse=True)
-            for cls_name, p in sorted_probs[:5]: # Show top 5 classes
-                pred_text += f"{cls_name.capitalize()}: {p*100:.1f}%\n"
+        result_text = ""
+        for img_path in self.selected_img_paths:
+            res = predict_image(model_path, img_path)
+            basename = os.path.basename(img_path)
+            if isinstance(res, str) and "Error" in res:
+                result_text += f"{basename}: {res}\n"
+            else:
+                best_class = res["class"]
+                prob = res["probabilities"][best_class] * 100
+                result_text += f"{basename}: {best_class.upper()} ({prob:.1f}%)\n"
                 
-            self.lbl_pred_result.configure(text=pred_text, text_color=GREEN, justify="left", font=("Arial", 16))
+        self.lbl_pred_result.configure(text=result_text, text_color=GREEN, justify="left", font=("Arial", 14))
+        self.btn_save_preds.configure(state="normal")
+
+    def save_predictions(self):
+        if not hasattr(self, 'selected_img_paths') or not self.selected_img_paths:
+            return
+            
+        model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'global_model.pt'))
+        
+        save_dir = filedialog.askdirectory(title="Select Directory to Save Prediction Results")
+        if not save_dir:
+            return
+            
+        self.lbl_pred_result.configure(text=f"Saving {len(self.selected_img_paths)} images...", text_color=YELLOW)
+        self.update_idletasks()
+        
+        results = predict_multiple_and_save(model_path, self.selected_img_paths, save_dir)
+        
+        if len(results) > 0 and "error" in results[0] and len(results[0]) == 1:
+            self.lbl_pred_result.configure(text=results[0]["error"], text_color="red")
+        else:
+            success_count = sum(1 for r in results if "error" not in r)
+            self.lbl_pred_result.configure(text=f"Successfully saved {success_count} images to:\n{save_dir}", text_color=GREEN, justify="left", font=("Arial", 14))
 
     def download_model(self):
         model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'global_model.pt'))
@@ -261,7 +303,7 @@ class ServerGUI(ctk.CTk):
         logo_frame.pack(pady=(30, 40))
         ctk.CTkLabel(logo_frame, text="⚙️", font=("Arial", 32), text_color=YELLOW).pack()
         
-        menu_items = [("HOME", "🏠"), ("CLIENTS", "👥"), ("MODEL", "🧠"), ("TERMINAL", "💻"), ("HELP", "❓")]
+        menu_items = [("HOME", "🏠"), ("GRAPH", "📊"), ("CLIENTS", "👥"), ("MODEL", "🧠"), ("TERMINAL", "💻"), ("HELP", "❓")]
         for item_name, icon in menu_items:
             btn = ctk.CTkButton(sidebar, text=f"{icon}   {item_name}", font=("Arial", 14, "bold"), 
                                 fg_color="transparent", text_color=TEXT_MAIN, hover_color="#333333", anchor="w",
@@ -282,6 +324,7 @@ class ServerGUI(ctk.CTk):
         self.main_container.grid_rowconfigure(0, weight=1)
         
         self.setup_home_frame()
+        self.setup_graph_frame()
         self.setup_clients_frame()
         self.setup_model_frame()
         self.setup_terminal_frame()
@@ -323,7 +366,9 @@ class ServerGUI(ctk.CTk):
         ctk.CTkButton(btn_row, text="🔄 RESTART", width=90, fg_color="transparent", border_width=1, border_color=YELLOW, text_color=YELLOW, hover_color="#333300", corner_radius=20, font=("Arial", 12, "bold"), command=self.restart_fastapi).pack(side="left", padx=10)
         
         self.lbl_server_status = ctk.CTkLabel(server_controls_frame, text="Server running: None", font=("Arial", 12), text_color=TEXT_SUB, justify="left")
-        self.lbl_server_status.pack(anchor="w", padx=15, pady=10)
+        self.lbl_server_status.pack(anchor="w", padx=15, pady=5)
+        
+        ctk.CTkButton(server_controls_frame, text="🚀 START TRAINING", fg_color=YELLOW, text_color="black", hover_color="#cccc00", corner_radius=20, font=("Arial", 14, "bold"), command=self.trigger_training).pack(anchor="w", padx=15, pady=(10, 5), fill="x")
         
         # 2. Connected Edge Nodes
         edge_frame = self.create_glass_panel(dash_body)
@@ -354,13 +399,23 @@ class ServerGUI(ctk.CTk):
         self.entry_m = add_input(training_frame, "m:", state.m)
         self.entry_k = add_input(training_frame, "k:", state.k)
         
-        # Reduce pady here so buttons fit inside the frame without getting cropped
-        ctk.CTkButton(training_frame, text="🚀 START TRAINING", fg_color=YELLOW, text_color="black", hover_color="#cccc00", corner_radius=20, font=("Arial", 14, "bold"), command=self.trigger_training).pack(pady=(15, 5), padx=15, fill="x")
+        self.freqsel_switch_var = ctk.BooleanVar(value=True)
+        self.freqsel_switch = ctk.CTkSwitch(
+            training_frame, 
+            text="Enable FREQSEL Filter", 
+            variable=self.freqsel_switch_var, 
+            command=self.toggle_freqsel,
+            onvalue=True, offvalue=False,
+            font=("Arial", 12, "bold"), text_color=TEXT_MAIN, progress_color=YELLOW
+        )
+        self.freqsel_switch.pack(pady=2, padx=20, anchor="w")
         
-        # Add the requested new button for FREQSEL & BSFL
-        ctk.CTkButton(training_frame, text="⚡ RUN FREQSEL & BSFL AGGREGATION", fg_color="transparent", border_width=1, border_color=YELLOW, text_color=YELLOW, hover_color="#333300", corner_radius=20, font=("Arial", 12, "bold"), command=self.trigger_training).pack(pady=(5, 5), padx=15, fill="x")
+        btn_row_train = ctk.CTkFrame(training_frame, fg_color="transparent")
+        btn_row_train.pack(fill="x", padx=15, pady=10)
         
-        ctk.CTkButton(training_frame, text="🧹 RESET STATE", fg_color="transparent", border_width=1, border_color="#ff5555", text_color="#ff5555", hover_color="#330000", corner_radius=20, font=("Arial", 12, "bold"), command=self.reset_state).pack(pady=(5, 10), padx=15, fill="x")
+        ctk.CTkButton(btn_row_train, text="⚡ RUN FREQSEL & BSFL AGGREGATION", fg_color="transparent", border_width=1, border_color=YELLOW, text_color=YELLOW, hover_color="#333300", corner_radius=20, font=("Arial", 11, "bold"), command=self.trigger_training).pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        ctk.CTkButton(btn_row_train, text="🧹 RESET STATE", fg_color="transparent", border_width=1, border_color="#ff5555", text_color="#ff5555", hover_color="#330000", corner_radius=20, font=("Arial", 12, "bold"), command=self.reset_state).pack(side="right", fill="x", expand=True, padx=(5, 0))
         
         # 4. UCB Joint Scoring Metrics
         ucb_frame = self.create_glass_panel(dash_body)
@@ -389,7 +444,7 @@ class ServerGUI(ctk.CTk):
         # --- BOTTOM ROW ---
         # 6. Aggregation Progress Bar
         agg_frame = self.create_glass_panel(dash_body)
-        agg_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
+        agg_frame.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=10, pady=10)
         
         ctk.CTkLabel(agg_frame, text="AGGREGATION PROGRESS BAR", font=("Arial", 12, "bold"), text_color=TEXT_MAIN).pack(anchor="nw", padx=15, pady=(15, 20))
         
@@ -404,11 +459,19 @@ class ServerGUI(ctk.CTk):
         self.progress_bar.pack(fill="x", padx=15, pady=(10, 20))
         self.progress_bar.set(0)
         
-        # 7. Simulated Accuracy & Loss vs Comm. Rounds
-        chart_frame_container = self.create_glass_panel(dash_body)
-        chart_frame_container.grid(row=2, column=1, columnspan=2, sticky="nsew", padx=10, pady=10)
+    def setup_graph_frame(self):
+        frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.frames["GRAPH"] = frame
+        ctk.CTkLabel(frame, text="Training Metrics Graph", font=("Arial", 22, "bold"), text_color=YELLOW).pack(pady=(0, 10), anchor="w")
         
-        ctk.CTkLabel(chart_frame_container, text="SIMULATED ACCURACY & LOSS VS COMM. ROUNDS", font=("Arial", 12, "bold"), text_color=TEXT_MAIN).pack(anchor="nw", padx=15, pady=(15, 0))
+        chart_frame_container = self.create_glass_panel(frame)
+        chart_frame_container.pack(fill="both", expand=True, pady=10)
+        
+        header_frame = ctk.CTkFrame(chart_frame_container, fg_color="transparent")
+        header_frame.pack(fill="x", padx=15, pady=(15, 0))
+        
+        ctk.CTkLabel(header_frame, text="ACCURACY & LOSS VS COMM. ROUNDS", font=("Arial", 14, "bold"), text_color=TEXT_MAIN).pack(side="left")
+        ctk.CTkButton(header_frame, text="💾 Download Graph", command=self.download_graph, fg_color=YELLOW, text_color="black", hover_color="#cccc00").pack(side="right")
         
         # Container for the live numeric values
         metrics_frame = ctk.CTkFrame(chart_frame_container, fg_color="transparent")
@@ -423,19 +486,16 @@ class ServerGUI(ctk.CTk):
         self.chart_frame = ctk.CTkFrame(chart_frame_container, fg_color="transparent")
         self.chart_frame.pack(fill="both", expand=True, padx=15, pady=(5, 15))
         
-        self.fig, self.ax1 = plt.subplots(figsize=(8, 2.5), dpi=100)
-        
+        self.fig, self.ax1 = plt.subplots(figsize=(10, 5), dpi=100)
         self.fig.patch.set_facecolor('white')
         self.ax1.set_facecolor('white')
-        
         self.ax1.grid(True, linestyle='-', color='#e0e0e0')
-        
-        self.ax1.tick_params(colors='black', labelsize=8)
+        self.ax1.tick_params(colors='black', labelsize=10)
         self.ax1.xaxis.label.set_color('black')
         self.ax1.yaxis.label.set_color('black')
         
         self.ax2 = self.ax1.twinx()
-        self.ax2.tick_params(colors='black', labelsize=8)
+        self.ax2.tick_params(colors='black', labelsize=10)
         self.ax2.yaxis.label.set_color('black')
         
         for spine in self.ax1.spines.values():
@@ -443,12 +503,12 @@ class ServerGUI(ctk.CTk):
         for spine in self.ax2.spines.values():
             spine.set_color('black')
             
-        self.ax1.set_ylabel("Accuracy (%)", fontsize=8)
-        self.ax1.set_xlabel("Communication Round", fontsize=8)
-        self.ax2.set_ylabel("Loss", fontsize=8)
+        self.ax1.set_ylabel("Accuracy (%)", fontsize=10)
+        self.ax1.set_xlabel("Communication Round", fontsize=10)
+        self.ax2.set_ylabel("Loss", fontsize=10)
         
         self.ax1.set_xlim(0, 50)
-        self.ax1.set_ylim(30, 95)
+        self.ax1.set_ylim(0, 100)
         self.ax2.set_ylim(0.0, 2.00)
         
         self.line_acc, = self.ax1.plot([], [], color='black', linestyle='-', linewidth=2, label='Avg Accuracy (%)')
@@ -456,10 +516,22 @@ class ServerGUI(ctk.CTk):
         
         lines = [self.line_acc, self.line_loss]
         labels = [l.get_label() for l in lines]
-        self.ax1.legend(lines, labels, loc='lower right', fontsize=8, frameon=False)
+        self.ax1.legend(lines, labels, loc='lower right', fontsize=10, frameon=False)
         
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.chart_frame)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def download_graph(self):
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            initialfile="training_metrics.png",
+            title="Save Graph As",
+            filetypes=(("PNG Image", "*.png"), ("JPEG Image", "*.jpg"), ("All files", "*.*"))
+        )
+        if save_path:
+            self.fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            import tkinter.messagebox
+            tkinter.messagebox.showinfo("Success", f"Graph saved to {save_path}")
 
     def setup_clients_frame(self):
         frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
@@ -514,7 +586,10 @@ class ServerGUI(ctk.CTk):
         btn_predict = ctk.CTkButton(pred_frame, text="🎯 Predict Class", command=self.predict, fg_color=YELLOW, text_color="black", hover_color="#cccc00")
         btn_predict.pack(pady=10)
         
-        self.lbl_pred_result = ctk.CTkLabel(pred_frame, text="", font=("Arial", 24, "bold"))
+        self.btn_save_preds = ctk.CTkButton(pred_frame, text="💾 Save Results as Images", command=self.save_predictions, fg_color="transparent", border_width=1, border_color=YELLOW, text_color=YELLOW, hover_color="#333300", state="disabled")
+        self.btn_save_preds.pack(pady=10)
+        
+        self.lbl_pred_result = ctk.CTkLabel(pred_frame, text="", font=("Arial", 16, "bold"), justify="left")
         self.lbl_pred_result.pack(pady=10)
 
     def setup_terminal_frame(self):
@@ -523,7 +598,7 @@ class ServerGUI(ctk.CTk):
         ctk.CTkLabel(frame, text="System Terminal", font=("Arial", 22, "bold"), text_color=YELLOW).pack(pady=(0, 10), anchor="w")
         self.terminal_textbox = ctk.CTkTextbox(frame, fg_color=PANEL_COLOR, text_color=GREEN, font=("Courier", 13), border_width=1, border_color=YELLOW)
         self.terminal_textbox.pack(fill="both", expand=True, pady=10)
-        sys.stdout = StdoutRedirector(self.terminal_textbox)
+        sys.stdout = StdoutRedirector(self.terminal_textbox, self.after)
         print("--- FAB-FL Terminal Initialized ---")
 
     def setup_help_frame(self):
@@ -562,7 +637,8 @@ class ServerGUI(ctk.CTk):
         for dev in state.connected_devices:
             dev_name = dev['device_name']
             clients = dev['num_clients']
-            edge_text += f"{dev_name:<15} {'NVIDIA Jetson':<15} {clients:<8} {'Online':<8}\n" # Hardware mocked as in photo
+            hw_name = dev.get('hardware_name', 'Unknown HW')
+            edge_text += f"{dev_name:<15} {hw_name[:14]:<15} {clients:<8} {'Online':<8}\n"
             
         self.edge_textbox.configure(state="normal")
         self.edge_textbox.delete("1.0", "end")
@@ -650,28 +726,39 @@ class ServerGUI(ctk.CTk):
         self.lbl_progress_clients.configure(text=f"{uploaded_count}/{selected_count} Clients")
         
         # Update Chart
-        if state.current_round > 0:
-            rounds = list(range(1, state.current_round + 1))
-            # Simulate accuracy and loss values for plotting based on rounds
-            accs = [(min(0.90, 0.40 + 0.15 * np.log(r))) * 100 for r in rounds]
-            losses = [max(0.1, 2.0 - 0.4 * np.log(r)) for r in rounds]
+        if state.current_round > 0 and hasattr(state, 'round_metrics'):
+            rounds = []
+            accs = []
+            losses = []
+            for r in range(1, state.current_round + 1):
+                if r in state.round_metrics:
+                    rounds.append(r)
+                    accs.append(state.round_metrics[r]["acc"])
+                    losses.append(state.round_metrics[r]["loss"])
             
-            self.line_acc.set_data(rounds, accs)
-            self.line_loss.set_data(rounds, losses)
-            
-            # Dynamic title
-            n_clients = len(state.clients) if state.clients else 20
-            max_r = state.max_rounds
-            self.ax1.set_title(f"Local Simulation Training Trend ({n_clients} Clients, {max_r} Rounds)", fontsize=10, color='black', pad=10)
-            
-            self.ax1.set_xlim(0, max(50, total_rounds))
-            self.canvas.draw()
-            
-            # Update metric number displays
-            latest_acc = accs[-1]
-            latest_loss = losses[-1]
-            self.lbl_acc_val.configure(text=f"Accuracy: {latest_acc:.1f}%")
-            self.lbl_loss_val.configure(text=f"Loss: {latest_loss:.3f}")
+            if rounds:
+                self.line_acc.set_data(rounds, accs)
+                self.line_loss.set_data(rounds, losses)
+                
+                # Dynamic title
+                n_clients = len(state.clients) if state.clients else 20
+                max_r = state.max_rounds
+                self.ax1.set_title(f"Global Model Evaluation ({n_clients} Clients, {max_r} Rounds)", fontsize=10, color='black', pad=10)
+                
+                self.ax1.set_xlim(0, max(50, total_rounds))
+                
+                # Set fixed y-limits for accuracy
+                self.ax1.set_ylim(0, 100)
+                
+                min_loss, max_loss = min(losses), max(losses)
+                self.ax2.set_ylim(max(0.0, min_loss - 0.1), max_loss + 0.1)
+                self.canvas.draw()
+                
+                # Update metric number displays
+                latest_acc = accs[-1]
+                latest_loss = losses[-1]
+                self.lbl_acc_val.configure(text=f"Accuracy: {latest_acc:.1f}%")
+                self.lbl_loss_val.configure(text=f"Loss: {latest_loss:.3f}")
             
         self.after(500, self.update_dashboard)
 

@@ -17,3 +17,10 @@ data/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Ignore build and distribution directories
+FAB-FL-Software/build/
+FAB-FL-Software/dist/
+
+# Ignore temporary archive files
+*.zip

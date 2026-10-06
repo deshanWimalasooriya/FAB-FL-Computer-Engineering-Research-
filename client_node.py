@@ -139,6 +139,10 @@ class ClientNode:
         
         return updated_state_dict, metrics
 
+    def ping(self):
+        """Lightweight heartbeat method to verify node availability."""
+        return True
+
 if __name__ == "__main__":
     print("Executing Phase 4: client_node.py (Ray Remote Client Node)")
     print("This module defines the @ray.remote actor and is designed to be executed via Ray from the server orchestrator.")

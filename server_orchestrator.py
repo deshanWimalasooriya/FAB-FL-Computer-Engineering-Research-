@@ -96,8 +96,12 @@ def main():
     print(f"Total Clients (N): {N}, Selected per round (m): {m}")
     
     # 2. Prepare Data (Phase 1)
-    print("\n[Phase 1] Partitioning CIFAR-10 data (Dirichlet alpha=0.5)...")
-    client_datasets, client_class_counts, testset = prepare_federated_data(num_clients=N, alpha=0.5)
+    print("\n[Phase 1] Partitioning CIFAR-10 data (Fully IID, ~800 images/client)...")
+    client_datasets, client_class_counts, testset = prepare_federated_data(
+        num_clients=N, 
+        alpha='iid', 
+        samples_per_client=800
+    )
     
     # Plot the client data distribution
     print("Plotting data distribution to 'client_data_distribution.png'...")
@@ -124,7 +128,8 @@ def main():
     
     print("\n=== Starting FAB-FL Training Loop ===")
     
-    for round_num in range(1, num_rounds + 1):
+    round_num = 1
+    while round_num <= num_rounds:
         print(f"\n--- Round {round_num} ---")
         
         # --- Stage 1: Metadata Collection & Evaluation (Phase 2) ---
@@ -133,44 +138,89 @@ def main():
         print(f"FREQSEL Filtered Candidate Pool (|K|={len(candidate_pool)}): {candidate_pool}")
         
         # --- Stage 2: BSFL Scheduling (Phase 3) ---
-        selected_clients = scheduler.schedule(candidate_pool)
-        print(f"BSFL Selected Clients (m={m}): {selected_clients}")
+        # Modify BSFL Scheduler logic: select m + delta (e.g., 2 reserve clients)
+        delta = 2
+        scheduler.m = m + delta
+        selected_candidates = scheduler.schedule(candidate_pool)
+        print(f"BSFL Selected Clients (m={m} + {delta} reserve): {selected_candidates}")
         
+        # --- PRE-TRAINING HEARTBEAT (Ping) ---
+        # Quick lightweight ping check to selected edge nodes before heavy tasks
+        selected_clients = []
+        for client_id in selected_candidates:
+            try:
+                node = client_nodes[client_id]
+                # Ping with a strict 2-second timeout. Unresponsive nodes throw TimeoutError.
+                is_alive = ray.get(node.ping.remote(), timeout=2.0)
+                if is_alive:
+                    selected_clients.append(client_id)
+            except Exception as e:
+                print(f"[HEARTBEAT] Node {client_id} dropped: {e}")
+                
+        if len(selected_clients) < m:
+            print(f"[ROUND VALIDATION] Heartbeat check failed. Only {len(selected_clients)} responsive nodes. Restarting round...")
+            continue
+            
         # --- Stage 3: Local Training via Ray ---
         global_state_dict = global_model.state_dict()
         
         # Dispatch training tasks to the selected Ray actors asynchronously
-        futures = []
+        futures = {}
         for client_id in selected_clients:
             node = client_nodes[client_id]
             # .remote() triggers the function on the Ray worker process
-            futures.append(node.train.remote(global_state_dict))
+            future = node.train.remote(global_state_dict)
+            futures[future] = client_id
             
-        # Wait for all selected clients to finish training
-        results = ray.get(futures)
-        
-        # Extract updated weights and simulated metrics
         client_weights_list = []
         round_latencies = {}
         round_loss = 0.0
         round_acc = 0.0
+        successful_clients = []
         
-        for updated_weights, metrics in results:
-            client_weights_list.append(updated_weights)
-            c_id = metrics['client_id']
-            round_latencies[c_id] = metrics['latency']
-            round_loss += metrics['loss']
-            round_acc += metrics['accuracy']
+        target_m_clients = m
+        
+        # --- ROBUST EXCEPTION HANDLING & RESERVE CLIENTS ---
+        # Wait for the first 'm' successful updates. Discard the rest.
+        while len(successful_clients) < target_m_clients and len(futures) > 0:
+            ready, not_ready = ray.wait(list(futures.keys()), num_returns=1, timeout=5.0)
             
-        avg_loss = round_loss / m
-        avg_acc = round_acc / m
+            if not ready:
+                continue
+                
+            f = ready[0]
+            cid = futures.pop(f)
+            
+            try:
+                updated_weights, metrics = ray.get(f)
+                client_weights_list.append(updated_weights)
+                round_latencies[cid] = metrics['latency']
+                round_loss += metrics['loss']
+                round_acc += metrics['accuracy']
+                successful_clients.append(cid)
+            except Exception as e:
+                # Catch ConnectionResetError / RayActorError and drop client
+                print(f"[LOCAL TRAINING] Client {cid} dropped/failed during training: {e}")
+                
+        # Cancel remaining straggler tasks
+        for f in futures:
+            ray.cancel(f, force=True)
+            
+        # --- STRICT ROUND VALIDATION (Zero-Data Aggregation Prevention) ---
+        if len(successful_clients) < target_m_clients:
+            print(f"[ROUND VALIDATION] ABORT ROUND: Only {len(successful_clients)} updates received (needed {target_m_clients}). Restarting client selection...")
+            # DO NOT increment round_num, continue loop to retry the same round
+            continue
+            
+        avg_loss = round_loss / target_m_clients
+        avg_acc = round_acc / target_m_clients
         # The bottleneck latency determines the speed of this communication round
         max_latency = max(round_latencies.values())
         
         print(f"Round {round_num} Local Training -> Avg Loss: {avg_loss:.4f} | Avg Acc: {avg_acc:.2f}% | Bottleneck Latency: {max_latency:.2f}s")
         
         # Feedback loop: Update Scheduler with the actual simulated latencies
-        scheduler.update_speed_records(selected_clients, round_latencies)
+        scheduler.update_speed_records(successful_clients, round_latencies)
         
         # --- Stage 4: Federated Aggregation (FedAvg) ---
         fedavg_aggregate(global_model, client_weights_list)
@@ -180,9 +230,10 @@ def main():
         test_loss, test_acc = evaluate_global_model(global_model, testset)
         print(f"Round {round_num} Global Model Evaluation -> Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%\n")
         
+        # Increment round number only after successful completion
+        round_num += 1
+        
         # Clear Ray Object Store and Collect Garbage
-        del futures
-        del results
         gc.collect()
         
     print("\n=== FAB-FL Training Complete ===")
