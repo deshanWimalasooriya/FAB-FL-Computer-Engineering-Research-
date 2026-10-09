@@ -288,6 +288,9 @@ class ServerGUI(ctk.CTk):
             
         self.current_frame = self.frames[name]
         self.current_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        
+        if name == "HISTORY":
+            self.refresh_history_list()
 
     def setup_ui(self):
         self.grid_columnconfigure(1, weight=1)
@@ -303,7 +306,7 @@ class ServerGUI(ctk.CTk):
         logo_frame.pack(pady=(30, 40))
         ctk.CTkLabel(logo_frame, text="⚙️", font=("Arial", 32), text_color=YELLOW).pack()
         
-        menu_items = [("HOME", "🏠"), ("GRAPH", "📊"), ("CLIENTS", "👥"), ("MODEL", "🧠"), ("TERMINAL", "💻"), ("HELP", "❓")]
+        menu_items = [("HOME", "🏠"), ("GRAPH", "📊"), ("HISTORY", "📜"), ("CLIENTS", "👥"), ("MODEL", "🧠"), ("TERMINAL", "💻"), ("HELP", "❓")]
         for item_name, icon in menu_items:
             btn = ctk.CTkButton(sidebar, text=f"{icon}   {item_name}", font=("Arial", 14, "bold"), 
                                 fg_color="transparent", text_color=TEXT_MAIN, hover_color="#333333", anchor="w",
@@ -325,6 +328,7 @@ class ServerGUI(ctk.CTk):
         
         self.setup_home_frame()
         self.setup_graph_frame()
+        self.setup_history_frame()
         self.setup_clients_frame()
         self.setup_model_frame()
         self.setup_terminal_frame()
@@ -529,9 +533,143 @@ class ServerGUI(ctk.CTk):
             filetypes=(("PNG Image", "*.png"), ("JPEG Image", "*.jpg"), ("All files", "*.*"))
         )
         if save_path:
-            self.fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            # Ensure titles and labels are present and explicitly set for publication
+            acc_data = self.line_acc.get_ydata()
+            loss_data = self.line_loss.get_ydata()
+            if len(acc_data) > 0 and len(loss_data) > 0:
+                final_acc = acc_data[-1]
+                final_loss = loss_data[-1]
+                title_text = f"Global Model Evaluation (Final Acc: {final_acc:.2f}%, Final Loss: {final_loss:.4f})"
+            else:
+                title_text = "Global Model Evaluation"
+            
+            self.ax1.set_title(title_text, fontsize=12, color='black', pad=10)
+            self.ax1.set_xlabel("Communication Rounds", fontsize=10, color='black')
+            self.ax1.set_ylabel("Accuracy (%)", fontsize=10, color='black')
+            self.ax2.set_ylabel("Loss", fontsize=10, color='black')
+            
+            lines = [self.line_acc, self.line_loss]
+            labels = [l.get_label() for l in lines]
+            self.ax1.legend(lines, labels, loc='lower right', fontsize=10, frameon=True, facecolor='white', framealpha=1.0)
+            
+            self.fig.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white', transparent=False)
             import tkinter.messagebox
             tkinter.messagebox.showinfo("Success", f"Graph saved to {save_path}")
+
+    def load_history_file(self, filepath):
+        import json
+        try:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+            
+            self.lbl_hist_details.configure(text=f"Total Clients: {data.get('clients', 'N/A')} | Max Rounds: {data.get('max_rounds', 'N/A')} | m: {data.get('m', 'N/A')} | k: {data.get('k', 'N/A')}")
+            
+            metrics = data.get("metrics", {})
+            rounds = []
+            accs = []
+            losses = []
+            
+            # metrics might have string keys because of JSON
+            for r_str, m_data in sorted(metrics.items(), key=lambda x: int(x[0])):
+                rounds.append(int(r_str))
+                accs.append(m_data["acc"])
+                losses.append(m_data["loss"])
+                
+            if rounds:
+                self.hist_line_acc.set_data(rounds, accs)
+                self.hist_line_loss.set_data(rounds, losses)
+                self.hist_ax1.set_xlim(0, max(50, max(rounds)))
+                
+                min_loss, max_loss = min(losses), max(losses)
+                self.hist_ax2.set_ylim(max(0.0, min_loss - 0.1), max_loss + 0.1)
+                self.hist_ax1.set_title(f"Historical Run ({data.get('timestamp', '')})", fontsize=10, color='black', pad=10)
+                self.hist_canvas.draw()
+                
+        except Exception as e:
+            print(f"Failed to load history: {e}")
+
+    def refresh_history_list(self):
+        import glob
+        for widget in self.hist_list_frame.winfo_children():
+            widget.destroy()
+            
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        hist_dir = os.path.join(base_dir, 'history')
+        history_files = glob.glob(os.path.join(hist_dir, "*.json"))
+        
+        if not history_files:
+            ctk.CTkLabel(self.hist_list_frame, text="No history files found.", text_color=TEXT_SUB).pack(pady=10)
+            return
+            
+        history_files.sort(reverse=True) # newest first
+        for f in history_files:
+            fname = os.path.basename(f)
+            btn = ctk.CTkButton(self.hist_list_frame, text=fname, fg_color="transparent", text_color=YELLOW, hover_color="#333333", anchor="w", command=lambda path=f: self.load_history_file(path))
+            btn.pack(fill="x", pady=2, padx=5)
+
+    def setup_history_frame(self):
+        frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.frames["HISTORY"] = frame
+        ctk.CTkLabel(frame, text="Training History Dashboard", font=("Arial", 22, "bold"), text_color=YELLOW).pack(pady=(0, 10), anchor="w")
+        
+        body = ctk.CTkFrame(frame, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+        
+        # Left side: list of past runs
+        left_panel = self.create_glass_panel(body)
+        left_panel.pack(side="left", fill="y", padx=(0, 10))
+        ctk.CTkLabel(left_panel, text="PAST RUNS", font=("Arial", 12, "bold"), text_color=TEXT_MAIN).pack(anchor="nw", padx=15, pady=(15, 10))
+        
+        ctk.CTkButton(left_panel, text="🔄 Refresh List", command=self.refresh_history_list, fg_color=YELLOW, text_color="black", hover_color="#cccc00", height=30).pack(padx=10, pady=(0, 10), fill="x")
+        
+        self.hist_list_frame = ctk.CTkScrollableFrame(left_panel, fg_color="transparent", width=200)
+        self.hist_list_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Right side: graph and details
+        right_panel = self.create_glass_panel(body)
+        right_panel.pack(side="left", fill="both", expand=True)
+        
+        self.lbl_hist_details = ctk.CTkLabel(right_panel, text="Select a run to view details...", font=("Arial", 14, "bold"), text_color=TEXT_MAIN)
+        self.lbl_hist_details.pack(anchor="nw", padx=15, pady=(15, 10))
+        
+        # Historical Graph
+        self.hist_chart_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
+        self.hist_chart_frame.pack(fill="both", expand=True, padx=15, pady=(5, 15))
+        
+        self.hist_fig, self.hist_ax1 = plt.subplots(figsize=(10, 5), dpi=100)
+        self.hist_fig.patch.set_facecolor('white')
+        self.hist_ax1.set_facecolor('white')
+        self.hist_ax1.grid(True, linestyle='-', color='#e0e0e0')
+        self.hist_ax1.tick_params(colors='black', labelsize=10)
+        self.hist_ax1.xaxis.label.set_color('black')
+        self.hist_ax1.yaxis.label.set_color('black')
+        
+        self.hist_ax2 = self.hist_ax1.twinx()
+        self.hist_ax2.tick_params(colors='black', labelsize=10)
+        self.hist_ax2.yaxis.label.set_color('black')
+        
+        for spine in self.hist_ax1.spines.values():
+            spine.set_color('black')
+        for spine in self.hist_ax2.spines.values():
+            spine.set_color('black')
+            
+        self.hist_ax1.set_ylabel("Accuracy (%)", fontsize=10)
+        self.hist_ax1.set_xlabel("Communication Round", fontsize=10)
+        self.hist_ax2.set_ylabel("Loss", fontsize=10)
+        
+        self.hist_ax1.set_xlim(0, 50)
+        self.hist_ax1.set_ylim(0, 100)
+        self.hist_ax2.set_ylim(0.0, 2.00)
+        
+        self.hist_line_acc, = self.hist_ax1.plot([], [], color='black', linestyle='-', linewidth=2, label='Avg Accuracy (%)')
+        self.hist_line_loss, = self.hist_ax2.plot([], [], color='grey', linestyle='--', linewidth=2, label='Avg Loss')
+        
+        lines = [self.hist_line_acc, self.hist_line_loss]
+        labels = [l.get_label() for l in lines]
+        self.hist_ax1.legend(lines, labels, loc='lower right', fontsize=10, frameon=False)
+        
+        self.hist_canvas = FigureCanvasTkAgg(self.hist_fig, master=self.hist_chart_frame)
+        self.hist_canvas.get_tk_widget().pack(fill="both", expand=True)
 
     def setup_clients_frame(self):
         frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
@@ -632,13 +770,14 @@ class ServerGUI(ctk.CTk):
 
     def update_dashboard(self):
         # Update Edge Nodes Textbox
-        edge_text = f"{'Node ID':<15} {'Physical HW':<15} {'Clients':<8} {'Status':<8}\n"
-        edge_text += "-"*50 + "\n"
+        edge_text = f"{'Node ID':<15} {'IP Address':<15} {'Physical HW':<15} {'Clients':<8} {'Status':<8}\n"
+        edge_text += "-"*65 + "\n"
         for dev in state.connected_devices:
             dev_name = dev['device_name']
             clients = dev['num_clients']
             hw_name = dev.get('hardware_name', 'Unknown HW')
-            edge_text += f"{dev_name:<15} {hw_name[:14]:<15} {clients:<8} {'Online':<8}\n"
+            ip_addr = dev.get('ip_address', 'Unknown IP')
+            edge_text += f"{dev_name[:14]:<15} {ip_addr[:14]:<15} {hw_name[:14]:<15} {clients:<8} {'Online':<8}\n"
             
         self.edge_textbox.configure(state="normal")
         self.edge_textbox.delete("1.0", "end")
@@ -652,8 +791,8 @@ class ServerGUI(ctk.CTk):
         pool_k = len(state.candidate_pool) if hasattr(state, 'candidate_pool') else 0
         self.lbl_cand_pool.configure(text=f"Selected Candidate Pool (K): {pool_k}")
         
-        clients_text = f"{'Global ID':<15} | {'Data Dist(L2)':<15} | {'Speed(ms)':<10} | {'Selections':<10}\n"
-        clients_text += "-"*60 + "\n"
+        clients_text = f"{'Global ID':<15} | {'Data Dist(L2)':<15} | {'Speed(ms)':<10} | {'Selections':<10} | {'Class Skew (Data Distribution)':<30}\n"
+        clients_text += "-"*100 + "\n"
         
         pool_text = f"{'Global ID':<15} | {'Data Dist(L2)':<15} | {'Speed(ms)':<10} | {'Selections':<10} | {'UCB Score':<10}\n"
         pool_text += "-"*75 + "\n"
@@ -664,7 +803,13 @@ class ServerGUI(ctk.CTk):
             spd = info.get("hardware_speed_ms", 0.0)
             sels = info.get("N_k", 0)
             
-            row_str = f"{global_id:<15} | {dist:<15.3f} | {spd:<10.1f} | {sels:<10}\n"
+            # Format class counts for display
+            counts = info.get("class_counts", {})
+            counts_str = ", ".join(f"C{k}:{v}" for k, v in counts.items() if v > 0)
+            if len(counts_str) > 40:
+                counts_str = counts_str[:37] + "..."
+            
+            row_str = f"{global_id:<15} | {dist:<15.3f} | {spd:<10.1f} | {sels:<10} | {counts_str}\n"
             clients_text += row_str
             
             if hasattr(state, 'candidate_pool') and global_id in state.candidate_pool:

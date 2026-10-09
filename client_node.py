@@ -1,32 +1,55 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import torchvision.models as models
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
 import ray
 import numpy as np
 import gc
+import json
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 @ray.remote
 class ClientNode:
-    def __init__(self, client_id, dataset_split, batch_size=32, local_epochs=10, learning_rate=0.01):
+    def __init__(self, client_id, json_mapping_path, batch_size=32, local_epochs=10, learning_rate=0.01):
         """
         Initializes the Ray remote client node for Federated Learning.
         
         Args:
             client_id: Unique identifier for the client.
-            dataset_split: PyTorch Subset containing this client's specific Non-IID data.
+            json_mapping_path: Path to the JSON file containing the non-IID data distribution mapping.
             batch_size: Batch size for local training.
             local_epochs: Number of epochs to train locally before sending weights back.
             learning_rate: Learning rate for local SGD optimizer.
         """
         self.client_id = client_id
-        self.dataset_split = dataset_split
         self.batch_size = batch_size
         self.local_epochs = local_epochs
         self.lr = learning_rate
+        
+        # Load the JSON mapping
+        with open(json_mapping_path, 'r') as f:
+            mapping = json.load(f)
+            
+        client_key = f"client_{client_id}"
+        assigned_indices = mapping.get(client_key, [])
+        
+        # Load the full local dataset into memory
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+        
+        # We use download=True to ensure it exists locally
+        full_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+        
+        # Use PyTorch's Subset to filter the dataset down to this client's assigned indices
+        self.dataset_split = Subset(full_dataset, assigned_indices)
+        
+        print(f"Client {client_id} initialized: Loaded {len(self.dataset_split)} total samples")
         
         # DataLoader for local training
         self.dataloader = DataLoader(self.dataset_split, batch_size=self.batch_size, shuffle=True)

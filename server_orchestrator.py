@@ -9,8 +9,9 @@ from torch.utils.data import DataLoader
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+import json
 # Import custom modules from previous phases
-from dataset import prepare_federated_data, plot_client_data_distribution
+from dataset import get_cifar10, plot_client_data_distribution
 from freqsel_filter import select_candidates
 from bsfl_scheduler import BSFLScheduler
 from client_node import ClientNode
@@ -95,14 +96,21 @@ def main():
     print("=== FAB-FL System Initialization ===")
     print(f"Total Clients (N): {N}, Selected per round (m): {m}")
     
-    # 2. Prepare Data (Phase 1)
-    print("\n[Phase 1] Partitioning CIFAR-10 data (Fully IID, ~800 images/client)...")
-    client_datasets, client_class_counts, testset = prepare_federated_data(
-        num_clients=N, 
-        alpha='iid', 
-        samples_per_client=800
-    )
+    # 2. Prepare Data Metadata & Test Set
+    print("\n[Phase 1] Loading global testset and reconstructing client class counts from mapping...")
+    trainset, testset = get_cifar10()
     
+    with open("client_data_mapping.json", 'r') as f:
+        mapping = json.load(f)
+        
+    client_class_counts = {}
+    for i in range(N):
+        client_class_counts[i] = {c: 0 for c in range(10)}
+        indices = mapping.get(f"client_{i}", [])
+        for idx in indices:
+            label = trainset.targets[idx]
+            client_class_counts[i][label] += 1
+            
     # Plot the client data distribution
     print("Plotting data distribution to 'client_data_distribution.png'...")
     plot_client_data_distribution(client_class_counts)
@@ -117,7 +125,7 @@ def main():
     for i in range(N):
         client_nodes[i] = ClientNode.remote(
             client_id=i, 
-            dataset_split=client_datasets[i],
+            json_mapping_path="client_data_mapping.json",
             batch_size=32,
             local_epochs=10,
             learning_rate=0.01
@@ -138,11 +146,10 @@ def main():
         print(f"FREQSEL Filtered Candidate Pool (|K|={len(candidate_pool)}): {candidate_pool}")
         
         # --- Stage 2: BSFL Scheduling (Phase 3) ---
-        # Modify BSFL Scheduler logic: select m + delta (e.g., 2 reserve clients)
-        delta = 2
-        scheduler.m = m + delta
+        # Select exactly m clients from candidate pool
+        scheduler.m = m
         selected_candidates = scheduler.schedule(candidate_pool)
-        print(f"BSFL Selected Clients (m={m} + {delta} reserve): {selected_candidates}")
+        print(f"BSFL Selected Clients (m={m}): {selected_candidates}")
         
         # --- PRE-TRAINING HEARTBEAT (Ping) ---
         # Quick lightweight ping check to selected edge nodes before heavy tasks

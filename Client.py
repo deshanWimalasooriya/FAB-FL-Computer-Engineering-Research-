@@ -58,16 +58,55 @@ def connect_device(server_url="http://127.0.0.1:8000", N=20, device_name="Laptop
         client_state["current_status"] = "Server Unreachable"
         return False
 
-def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5):
+def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5, mapping_file=None):
     try:
         client_state["stop_flag"] = False
         
+        import json
+        from torch.utils.data import Subset
+        
         # 1. Initialize dataset and non-IID partitioning
-        log(f"Initializing {N} virtual clients locally and partitioning data with alpha={alpha:.2f}...")
-        client_state["current_status"] = "Partitioning Data (Downloading if needed)..."
-        client_datasets, client_class_counts, _ = prepare_federated_data(
-            num_clients=N, alpha=alpha, progress_callback=update_progress
-        )
+        if mapping_file and os.path.exists(mapping_file):
+            log(f"Found '{mapping_file}'. Loading static data distribution...")
+            client_state["current_status"] = "Loading Static Mapping..."
+            
+            from dataset import get_cifar10
+            trainset, _ = get_cifar10()
+            
+            with open(mapping_file, 'r') as f:
+                mapping = json.load(f)
+                
+            client_datasets = {}
+            client_class_counts = {}
+            
+            for i in range(N):
+                indices = mapping.get(f"client_{i}", [])
+                client_datasets[i] = Subset(trainset, indices)
+                
+                # Reconstruct class counts for the GUI visualization
+                counts = {c: 0 for c in range(10)}
+                for idx in indices:
+                    c = trainset.targets[idx]
+                    counts[c] += 1
+                client_class_counts[i] = counts
+                
+            log(f"Successfully loaded static distribution for {N} clients.")
+            update_progress(1.0)
+        else:
+            if mapping_file:
+                log(f"Warning: {mapping_file} not found. Generating new distribution...")
+            
+            log(f"Initializing {N} virtual clients locally and partitioning data with alpha={alpha:.2f}...")
+            client_state["current_status"] = "Partitioning Data (Downloading if needed)..."
+            client_datasets, client_class_counts, _ = prepare_federated_data(
+                num_clients=N, alpha=alpha, progress_callback=update_progress
+            )
+            
+            mapping_to_save = {}
+            for i in range(N):
+                # Ensure we save as standard list of integers
+                mapping_to_save[f"client_{i}"] = [int(idx) for idx in client_datasets[i].indices]
+            client_state["last_mapping"] = mapping_to_save
     
         if client_state["stop_flag"]:
             log("Process stopped.")
@@ -247,16 +286,34 @@ def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5):
                         if client_state["stop_flag"]:
                             break
                         
-                        # Upload model
+                        # Upload model with retry logic to handle network instability (WinError 10060)
                         client_state["current_status"] = f"Uploading {gid}..."
-                        files = {"file": (f"{gid}.pt", buffer, "application/octet-stream")}
-                        params = {"global_id": gid, "hardware_speed_ms": train_time_ms}
-                        upload_res = requests.post(f"{server_url}/upload_model", params=params, files=files)
-                    
-                        if upload_res.status_code == 200:
-                            log(f"[{gid}] Successfully uploaded weights.")
-                        else:
-                            log(f"[{gid}] Failed to upload weights: {upload_res.text}")
+                        
+                        max_retries = 3
+                        upload_success = False
+                        for attempt in range(max_retries):
+                            if client_state["stop_flag"]:
+                                break
+                            
+                            try:
+                                buffer.seek(0) # Reset buffer pointer before each upload attempt
+                                files = {"file": (f"{gid}.pt", buffer, "application/octet-stream")}
+                                params = {"global_id": gid, "hardware_speed_ms": train_time_ms}
+                                
+                                upload_res = requests.post(f"{server_url}/upload_model", params=params, files=files, timeout=60)
+                                
+                                if upload_res.status_code == 200:
+                                    log(f"[{gid}] Successfully uploaded weights.")
+                                    upload_success = True
+                                    break
+                                else:
+                                    log(f"[{gid}] Failed to upload weights (Attempt {attempt+1}): {upload_res.text}")
+                            except Exception as e:
+                                log(f"[{gid}] Upload error (Attempt {attempt+1}/{max_retries}): {e}")
+                                time.sleep(3) # Wait before retrying
+                                
+                        if not upload_success and not client_state["stop_flag"]:
+                            log(f"[{gid}] FATAL: Could not upload weights after {max_retries} attempts.")
                 
                     client_state["active_training_gid"] = None
                     client_state["current_status"] = "Waiting for Server..."

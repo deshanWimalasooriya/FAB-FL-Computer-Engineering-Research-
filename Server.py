@@ -11,7 +11,7 @@ import torch
 import uvicorn
 import threading
 import time
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 from typing import Dict, List, Any
@@ -77,20 +77,23 @@ class ToggleFreqselRequest(BaseModel):
 
 # --- 1. Registration Handshake ---
 @app.post("/connect_device")
-def connect_device(req: ConnectDeviceRequest):
+def connect_device(req: ConnectDeviceRequest, request: Request):
+    client_ip = request.client.host
     # Check if already connected
     for device in state.connected_devices:
         if device["device_name"] == req.device_name:
             device["num_clients"] = req.num_clients
             device["hardware_name"] = req.hardware_name
+            device["ip_address"] = client_ip
             return {"status": "success", "message": "Device updated"}
             
     state.connected_devices.append({
         "device_name": req.device_name,
         "num_clients": req.num_clients,
-        "hardware_name": req.hardware_name
+        "hardware_name": req.hardware_name,
+        "ip_address": client_ip
     })
-    print(f"[SERVER] New device connected: {req.device_name} ({req.hardware_name}) hosting {req.num_clients} clients.")
+    print(f"[SERVER] New device connected: {req.device_name} ({req.hardware_name}) from {client_ip} hosting {req.num_clients} clients.")
     return {"status": "success"}
 
 @app.post("/set_params")
@@ -214,9 +217,8 @@ def run_ucb_selection():
         # Save to state for GUI
         state.clients[gid]["ucb_score"] = score
         
-    # Select top m + delta clients for reserve strategy
-    delta = 2
-    actual_m = min(state.m + delta, len(candidate_gids))
+    # Select exactly m clients from the candidate pool
+    actual_m = min(state.m, len(candidate_gids))
     top_m_idx = np.argsort(ucb_scores)[-actual_m:]
         
     selected_gids = [candidate_gids[idx] for idx in top_m_idx]
@@ -395,6 +397,32 @@ def perform_fed_avg():
         threading.Thread(target=auto_trigger_round).start()
     else:
         print(f"\n[SERVER] Maximum rounds ({state.max_rounds}) reached! Training complete.")
+        save_run_history()
+
+def save_run_history():
+    import json
+    import datetime
+    import os
+    import time
+    
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    hist_dir = os.path.join(base_dir, "history")
+    os.makedirs(hist_dir, exist_ok=True)
+    history = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "metrics": state.round_metrics,
+        "clients": len(state.clients),
+        "max_rounds": state.max_rounds,
+        "m": state.m,
+        "k": state.k
+    }
+    filename = os.path.join(hist_dir, f"run_{int(time.time())}.json")
+    try:
+        with open(filename, "w") as f:
+            json.dump(history, f, indent=4)
+        print(f"[SERVER] Run history saved to {filename}")
+    except Exception as e:
+        print(f"[SERVER] Failed to save history: {e}")
 
 if __name__ == "__main__":
     print("=== FAB-FL Server (Laptop 1) ===")

@@ -27,6 +27,30 @@ CLASS_COLORS = [
 
 ctk.set_appearance_mode("Dark")
 
+class AsyncStdoutRedirector:
+    def __init__(self, text_widget, after_method):
+        self.text_widget = text_widget
+        self.after = after_method
+
+    def write(self, string):
+        def _write():
+            yview = self.text_widget.yview()
+            is_at_bottom = yview[1] >= 0.99
+            
+            self.text_widget.configure(state="normal")
+            self.text_widget.insert("end", string)
+            self.text_widget.configure(state="disabled")
+            
+            if is_at_bottom:
+                self.text_widget.see("end")
+        self.after(0, _write)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
 class ClientGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -66,6 +90,8 @@ class ClientGUI(ctk.CTk):
         n = int(n_val)
         alpha = self.alpha_slider.get()
         
+        mapping_file = getattr(self, 'mapping_file_path', None)
+        
         self.btn_start.configure(state="disabled", text="Running...")
         self.btn_stop.configure(state="normal")
         self.url_entry.configure(state="disabled")
@@ -73,10 +99,13 @@ class ClientGUI(ctk.CTk):
         self.dev_entry.configure(state="disabled")
         self.alpha_slider.configure(state="disabled")
         
+        if hasattr(self, 'btn_load_map'):
+            self.btn_load_map.configure(state="disabled")
+        
         for widget in self.pool_scroll.winfo_children():
             widget.destroy()
             
-        threading.Thread(target=Client.start_process, args=(url, n, alpha), daemon=True).start()
+        threading.Thread(target=Client.start_process, args=(url, n, alpha, mapping_file), daemon=True).start()
 
     def update_alpha_label(self, value):
         self.alpha_lbl.configure(text=f"{value:.2f}")
@@ -91,6 +120,29 @@ class ClientGUI(ctk.CTk):
         self.n_entry.configure(state="normal")
         self.dev_entry.configure(state="normal")
         self.alpha_slider.configure(state="normal")
+        
+        if hasattr(self, 'btn_load_map'):
+            self.btn_load_map.configure(state="normal")
+
+    def export_mapping(self):
+        mapping = Client.client_state.get("last_mapping")
+        if not mapping:
+            import tkinter.messagebox
+            tkinter.messagebox.showerror("Error", "No generated mapping available to export.")
+            return
+            
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            initialfile="data_partition.json",
+            title="Export Data Partition Mapping",
+            filetypes=(("JSON File", "*.json"),)
+        )
+        if save_path:
+            import json
+            with open(save_path, 'w') as f:
+                json.dump(mapping, f, indent=4)
+            import tkinter.messagebox
+            tkinter.messagebox.showinfo("Success", f"Mapping saved to {save_path}")
 
     def browse_image(self):
         filepaths = filedialog.askopenfilenames(
@@ -301,6 +353,23 @@ class ClientGUI(ctk.CTk):
         self.btn_stop = ctk.CTkButton(btn_row, text="⏹ STOP", width=80, fg_color="transparent", border_width=1, border_color=YELLOW, text_color=YELLOW, hover_color="#333300", corner_radius=20, font=("Arial", 12, "bold"), command=self.stop_process, state="disabled")
         self.btn_stop.pack(side="left", padx=10)
         
+        chk_row = ctk.CTkFrame(proc_frame, fg_color="transparent")
+        chk_row.pack(anchor="w", padx=15, pady=5)
+        
+        self.mapping_file_path = None
+        
+        def load_mapping_cmd():
+            filepath = filedialog.askopenfilename(title="Select Mapping JSON", filetypes=[("JSON", "*.json")])
+            if filepath:
+                self.mapping_file_path = filepath
+                self.btn_load_map.configure(text=f"Loaded: {os.path.basename(filepath)}")
+                
+        self.btn_load_map = ctk.CTkButton(chk_row, text="Load Mapping...", command=load_mapping_cmd, width=120, fg_color="transparent", border_width=1, border_color=YELLOW, text_color=YELLOW)
+        self.btn_load_map.pack(side="left", padx=(0, 10))
+        
+        self.btn_export_map = ctk.CTkButton(chk_row, text="Export Mapping As...", command=self.export_mapping, width=120, fg_color="transparent", border_width=1, border_color=YELLOW, text_color=YELLOW)
+        self.btn_export_map.pack(side="left", padx=10)
+        
         self.lbl_status = ctk.CTkLabel(proc_frame, text="Starts data download, Non-IID partitioning, registers clients, polls server.\nOverall Status: Idle", font=("Arial", 12), text_color=TEXT_SUB, justify="left")
         self.lbl_status.pack(anchor="w", padx=15, pady=(10, 5))
         
@@ -333,6 +402,10 @@ class ClientGUI(ctk.CTk):
         
         self.log_textbox = ctk.CTkTextbox(log_frame, fg_color="transparent", text_color=TEXT_MAIN, font=("Courier", 12), state="disabled")
         self.log_textbox.pack(fill="both", expand=True, padx=10, pady=(0, 15))
+        
+        redirector = AsyncStdoutRedirector(self.log_textbox, self.after)
+        sys.stdout = redirector
+        sys.stderr = redirector
 
     def setup_model_frame(self):
         frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
@@ -434,16 +507,6 @@ class ClientGUI(ctk.CTk):
         if state["memory_cleared_msg"]:
             mem_text = "Memory Management: gc.collect()\nsuccess, torch.cuda.empty_cache()\nsuccess, strictly managed for\nsequential local training."
             self.lbl_memory.configure(text=mem_text)
-        
-        if len(state["logs"]) > self.last_log_count:
-            new_logs = state["logs"][self.last_log_count:]
-            self.last_log_count = len(state["logs"])
-            
-            self.log_textbox.configure(state="normal")
-            for log in new_logs:
-                self.log_textbox.insert("end", log + "\n")
-            self.log_textbox.see("end")
-            self.log_textbox.configure(state="disabled")
             
         self.after(500, self.update_dashboard)
 
