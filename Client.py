@@ -211,10 +211,27 @@ def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5, mapping_f
                     # 4. Download Global Model
                     representative_gid = our_selected[0][1]
                     log(f"Downloading global model via {representative_gid}...")
-                    model_res = requests.get(f"{server_url}/get_model", params={"global_id": representative_gid})
-                
-                    if model_res.status_code != 200:
-                        log("Failed to download global model.")
+                    
+                    max_retries_download = 5
+                    download_success = False
+                    for attempt in range(max_retries_download):
+                        if client_state["stop_flag"]:
+                            break
+                        try:
+                            model_res = requests.get(f"{server_url}/get_model", params={"global_id": representative_gid}, timeout=120)
+                            if model_res.status_code == 200:
+                                download_success = True
+                                break
+                            else:
+                                log(f"Failed to download global model: {model_res.status_code}. Retrying...")
+                                time.sleep(2)
+                        except requests.exceptions.RequestException as e:
+                            log(f"Network error while downloading model: {e}. Retrying {attempt+1}/{max_retries_download}...")
+                            time.sleep(3)
+                    
+                    if not download_success:
+                        log("Could not download global model after retries. Reverting round state to try again.")
+                        local_round -= 1  # Revert so we retry next poll
                         time.sleep(2)
                         continue
                     
@@ -289,12 +306,10 @@ def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5, mapping_f
                         # Upload model with retry logic to handle network instability (WinError 10060)
                         client_state["current_status"] = f"Uploading {gid}..."
                         
-                        max_retries = 3
                         upload_success = False
-                        for attempt in range(max_retries):
-                            if client_state["stop_flag"]:
-                                break
-                            
+                        attempt = 0
+                        while not upload_success and not client_state["stop_flag"]:
+                            attempt += 1
                             try:
                                 buffer.seek(0) # Reset buffer pointer before each upload attempt
                                 files = {"file": (f"{gid}.pt", buffer, "application/octet-stream")}
@@ -305,21 +320,18 @@ def start_process(server_url="http://127.0.0.1:8000", N=20, alpha=0.5, mapping_f
                                 if upload_res.status_code == 200:
                                     log(f"[{gid}] Successfully uploaded weights.")
                                     upload_success = True
-                                    break
                                 else:
-                                    log(f"[{gid}] Failed to upload weights (Attempt {attempt+1}): {upload_res.text}")
+                                    log(f"[{gid}] Failed to upload weights (Attempt {attempt}): {upload_res.text}")
+                                    time.sleep(3)
                             except Exception as e:
-                                log(f"[{gid}] Upload error (Attempt {attempt+1}/{max_retries}): {e}")
+                                log(f"[{gid}] Upload error (Attempt {attempt}): {e}")
                                 time.sleep(3) # Wait before retrying
-                                
-                        if not upload_success and not client_state["stop_flag"]:
-                            log(f"[{gid}] FATAL: Could not upload weights after {max_retries} attempts.")
                 
                     client_state["active_training_gid"] = None
                     client_state["current_status"] = "Waiting for Server..."
                         
-            except requests.exceptions.ConnectionError:
-                pass # Server might be down, just wait
+            except requests.exceptions.RequestException as e:
+                pass # Server might be down or network unstable, just wait and retry
             
             time.sleep(2) # Poll every 2 seconds
         
